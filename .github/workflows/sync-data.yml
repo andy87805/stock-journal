@@ -1,0 +1,60 @@
+name: Sync Trading Data
+
+on:
+  schedule:
+    # 05:35 UTC = 13:35 台灣時間，台股收盤後（週一到週五）
+    - cron: "35 5 * * 1-5"
+    # 21:30 UTC ≈ 16:30-17:30 美東時間（美股收盤後），美國有夏令時間切換
+    # 這個 cron 是固定 UTC 時間，夏令/冬令會差一小時，個人用途可接受，不精修
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      SHIOAJI_API_KEY: ${{ secrets.SHIOAJI_API_KEY }}
+      SHIOAJI_API_SECRET: ${{ secrets.SHIOAJI_API_SECRET }}
+      SCHWAB_CLIENT_ID: ${{ secrets.SCHWAB_CLIENT_ID }}
+      SCHWAB_CLIENT_SECRET: ${{ secrets.SCHWAB_CLIENT_SECRET }}
+      SCHWAB_REFRESH_TOKEN: ${{ secrets.SCHWAB_REFRESH_TOKEN }}
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r sync/requirements.txt
+
+      # 三支腳本各自 continue-on-error，避免其中一個掛掉擋住其他兩個
+      # （例如永豐 API 掛了不該影響 Schwab 或 calendar 同步）
+      - name: Sync Shioaji (台股)
+        id: shioaji
+        continue-on-error: true
+        run: python sync/shioaji_sync.py
+
+      - name: Sync Schwab (美股)
+        id: schwab
+        continue-on-error: true
+        run: python sync/schwab_sync.py
+
+      - name: Sync Calendar (除權息/財報日)
+        id: calendar
+        continue-on-error: true
+        run: python sync/calendar_sync.py
+
+      # 前面三步都設了 continue-on-error，job 本身不會因此變紅
+      # 這一步手動檢查有沒有任一步失敗，有的話讓 job 失敗
+      # 好處：GitHub 內建的失敗通知信才會正常觸發
+      - name: Check for failures
+        if: always()
+        run: |
+          if [ "${{ steps.shioaji.outcome }}" = "failure" ] || \
+             [ "${{ steps.schwab.outcome }}" = "failure" ] || \
+             [ "${{ steps.calendar.outcome }}" = "failure" ]; then
+            echo "至少一支同步腳本失敗，詳見上方對應步驟的 log"
+            exit 1
+          fi

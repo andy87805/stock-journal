@@ -1,0 +1,22 @@
+# 機密/本機設定
+config/
+.env
+
+# iOS build 產物
+*.ipa
+ios/*.xcodeproj/
+ios/DerivedData/
+ios/Sources/GoogleService-Info.plist
+ios-build/output/
+
+# fastlane
+fastlane/report.xml
+fastlane/Preview.html
+ios-build/publish/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

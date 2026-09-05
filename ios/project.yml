@@ -1,0 +1,49 @@
+name: StockJournal
+options:
+  bundleIdPrefix: com.andy878005
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+packages:
+  FirebaseiOS:
+    url: https://github.com/firebase/firebase-ios-sdk
+    from: "10.0.0"
+
+targets:
+  StockJournal:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Sources
+    dependencies:
+      - package: FirebaseiOS
+        product: FirebaseFirestore
+      - package: FirebaseiOS
+        product: FirebaseAuth
+    info:
+      path: Generated-Info.plist
+      properties:
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        CFBundleDisplayName: StockJournal
+        # TODO: bundle identifier below is a placeholder — change to your own
+        # Apple Developer account's identifier before archiving/distributing.
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        # TODO: placeholder bundle id — replace with your own if needed.
+        PRODUCT_BUNDLE_IDENTIFIER: com.andy878005.stockjournal
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+
+    # NOTE: GoogleService-Info.plist does NOT exist in this repo yet.
+    # It must be downloaded from the Firebase console for this app's bundle id
+    # and added to the Xcode project (target membership: StockJournal) as a
+    # build step in CI (macOS runner) before `xcodebuild` runs — xcodegen
+    # itself does not fetch or generate it. Without this file FirebaseApp.configure()
+    # will crash at launch.
