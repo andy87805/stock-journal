@@ -1,6 +1,8 @@
 # 機密/本機設定
 config/
 .env
+*firebase-adminsdk*.json
+*service-account*.json
 
 # iOS build 產物
 *.ipa
