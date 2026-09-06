@@ -8,6 +8,7 @@ config/
 *.ipa
 ios/*.xcodeproj/
 ios/DerivedData/
+GoogleService-Info.plist
 ios/Sources/GoogleService-Info.plist
 ios-build/output/
 
