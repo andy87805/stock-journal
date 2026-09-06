@@ -64,9 +64,15 @@ git push -u origin main
 ## 4. Schwab 開發者帳號
 
 1. 到 https://developer.schwab.com 註冊開發者帳號。
-2. 建立一個 App，Redirect/Callback URI 填 `http://localhost:8182`（`sync/schwab_auth.py` 目前寫死監聽這個 URI，是 plain http，不是 https）。
+2. 建立一個 App，Redirect/Callback URI 填 `https://127.0.0.1:8182`（已確認 Schwab 強制要求 https，`sync/schwab_auth.py` 已改用這個 URI，並用自簽憑證起本機 HTTPS server）。
 
-   如果 Schwab Developer Portal 當下畫面強制要求 https 才能建立 App，代表這個腳本要跟著改，屆時請對照 Portal 當下的實際要求調整 `sync/schwab_auth.py` 裡的 `REDIRECT_URI`，這裡不確定 Schwab 政策是否會變動。
+   跑 `schwab_auth.py` 前先產生一次自簽憑證（憑證不進 git，已加進 `.gitignore`）：
+
+   ```bash
+   openssl req -x509 -newkey rsa:2048 -keyout sync/.localcert/key.pem -out sync/.localcert/cert.pem -days 3650 -nodes -subj "/CN=127.0.0.1"
+   ```
+
+   跑腳本時瀏覽器會因為自簽憑證跳出「連線不安全」警告，確認網址列是 `127.0.0.1:8182` 後點繼續前往即可，這是預期行為。
 
 3. 拿到 Client ID / Secret，存成：
    - `SCHWAB_CLIENT_ID`

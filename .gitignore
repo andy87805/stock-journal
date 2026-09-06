@@ -3,6 +3,7 @@ config/
 .env
 *firebase-adminsdk*.json
 *service-account*.json
+sync/.localcert/
 
 # iOS build 產物
 *.ipa
