@@ -30,7 +30,8 @@ from datetime import date, datetime, timedelta
 BROKER = "sinopac"
 MARKET = "TW"
 CURRENCY = "TWD"
-DEFAULT_LOOKBACK_DAYS = 3650
+DEFAULT_LOOKBACK_DAYS = 1825  # 5 年
+WINDOW_DAYS = 364  # 永豐限制單次查詢不得超過 12 個月
 
 
 def _f(value, default=0.0):
@@ -128,7 +129,22 @@ def build_positions(api, account):
 
 
 def build_realized(api, account, begin, end):
-    """每次平倉的已實現損益 + 逐筆明細（明細用來算進場成本與加權進場日）。"""
+    """每次平倉的已實現損益 + 逐筆明細（明細用來算進場成本與加權進場日）。
+
+    永豐限制單次查詢區間不得超過 12 個月，所以切成一年一段再合併。
+    明細是用 id 對應「最近一次 list_profit_loss 的結果」，因此每一段都必須
+    當場把明細抓完才能查下一段，不能先收集所有紀錄最後再統一抓明細。
+    """
+    records = []
+    window_start = begin
+    while window_start <= end:  # <= 才不會漏掉最後一天（當天平倉的交易）
+        window_end = min(window_start + timedelta(days=WINDOW_DAYS), end)
+        records.extend(_build_realized_window(api, account, window_start, window_end))
+        window_start = window_end + timedelta(days=1)
+    return records
+
+
+def _build_realized_window(api, account, begin, end):
     records = []
     for pnl in api.list_profit_loss(account, begin.isoformat(), end.isoformat()):
         symbol = str(getattr(pnl, "code", "")).strip()
