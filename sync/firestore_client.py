@@ -50,8 +50,16 @@ def init_firestore():
         raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
         if raw:
             cred = credentials.Certificate(_parse_service_account(raw))
-        else:
+        elif SERVICE_ACCOUNT_FILE.exists():
             cred = credentials.Certificate(str(SERVICE_ACCOUNT_FILE))
+        else:
+            # GitHub Secrets 是綁單一 repo 的，加在別的 repo 這裡會拿到空值
+            raise SystemExit(
+                "找不到 Firebase 憑證：環境變數 FIREBASE_SERVICE_ACCOUNT 沒有設定，"
+                f"也沒有 {SERVICE_ACCOUNT_FILE}。\n"
+                "在 GitHub Actions 上請確認 secret 是加在這個 repo（Settings → "
+                "Secrets and variables → Actions），不是加在其他 repo。"
+            )
         firebase_admin.initialize_app(cred)
     return firestore.client()
 
