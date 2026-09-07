@@ -37,11 +37,13 @@ def fetch_upcoming_events(db, days):
     # 上界取「最後一天的隔天 00:00」當開區間，才不會漏掉帶時間部分的值。
     end_exclusive = (today + timedelta(days=days + 1)).isoformat()
 
+    from google.cloud.firestore_v1.base_query import FieldFilter
+
     events = []
     query = (
         db.collection("calendarEvents")
-        .where("eventDate", ">=", start)
-        .where("eventDate", "<", end_exclusive)
+        .where(filter=FieldFilter("eventDate", ">=", start))
+        .where(filter=FieldFilter("eventDate", "<", end_exclusive))
     )
     for doc in query.stream():
         data = doc.to_dict()

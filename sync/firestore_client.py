@@ -2,6 +2,8 @@
 共用 Firestore 存取層。broker 同步腳本 (shioaji_sync.py / schwab_sync.py / calendar_sync.py)
 都透過這裡的函式寫入資料，確保 document ID 產生規則與 SCHEMA.md 一致。
 """
+import base64
+import binascii
 import json
 import os
 from datetime import datetime, timezone
@@ -18,13 +20,36 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_service_account(raw):
+    """接受 base64 或原始 JSON。
+
+    多行 JSON 貼進 GitHub Secret 欄位容易被前後空白、BOM 之類的東西弄壞，
+    base64（單行）比較不會出事，所以兩種都接受：先試 base64，失敗才當原始 JSON。
+    """
+    text = raw.strip().lstrip("﻿")
+    if not text.startswith("{"):
+        try:
+            text = base64.b64decode(text, validate=True).decode("utf-8").strip().lstrip("﻿")
+        except (binascii.Error, UnicodeDecodeError) as exc:
+            raise SystemExit(
+                "FIREBASE_SERVICE_ACCOUNT 既不是合法的 JSON 也不是合法的 base64，"
+                f"請重新設定這個 secret（長度 {len(raw)}）：{exc}"
+            )
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"FIREBASE_SERVICE_ACCOUNT 解析失敗，內容可能在貼上時被截斷（長度 {len(raw)}）：{exc}"
+        )
+
+
 def init_firestore():
     """本機執行讀 config/firebase-service-account.json；GitHub Actions 等雲端環境用
-    FIREBASE_SERVICE_ACCOUNT 環境變數（服務帳戶 JSON 的原始字串內容，同名環境變數優先）。"""
+    FIREBASE_SERVICE_ACCOUNT 環境變數（服務帳戶 JSON，可以是原始內容或 base64）。"""
     if not firebase_admin._apps:
         raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
         if raw:
-            cred = credentials.Certificate(json.loads(raw))
+            cred = credentials.Certificate(_parse_service_account(raw))
         else:
             cred = credentials.Certificate(str(SERVICE_ACCOUNT_FILE))
         firebase_admin.initialize_app(cred)

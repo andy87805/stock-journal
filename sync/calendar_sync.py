@@ -55,15 +55,15 @@ def generate_dry_run_events():
 
 
 def collect_symbols(db):
+    from google.cloud.firestore_v1.base_query import FieldFilter
+
     tw_symbols, us_symbols = set(), set()
-    for doc in db.collection("trades").where("market", "==", "TW").stream():
-        symbol = doc.to_dict().get("symbol")
-        if symbol:
-            tw_symbols.add(symbol)
-    for doc in db.collection("trades").where("market", "==", "US").stream():
-        symbol = doc.to_dict().get("symbol")
-        if symbol:
-            us_symbols.add(symbol)
+    for market, bucket in (("TW", tw_symbols), ("US", us_symbols)):
+        query = db.collection("trades").where(filter=FieldFilter("market", "==", market))
+        for doc in query.stream():
+            symbol = doc.to_dict().get("symbol")
+            if symbol:
+                bucket.add(symbol)
     return tw_symbols, us_symbols
 
 
