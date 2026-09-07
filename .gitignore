@@ -5,6 +5,15 @@ config/
 *service-account*.json
 sync/.localcert/
 
+# 券商 CA 憑證：這是 repo 裡最敏感的東西，而且這個 repo 是 public。
+# 憑證本身不該放在專案目錄，這幾條只是最後一道保險。
+*.pfx
+*.p12
+*.pem
+*.cer
+*.crt
+*.key
+
 # 舊 iOS 方案殘留（已改用 PWA，這個檔案現在沒用途但還在磁碟上）
 GoogleService-Info.plist
 
