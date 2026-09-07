@@ -121,8 +121,34 @@ def main():
     )
     show("list_settlements（交割金額）", lambda: api.list_settlements(stock_account))
 
-    # 平均持有天數要靠 list_profit_loss_detail 的進場日，而 detail 是用 id 對應的。
-    # 如果每筆 list_profit_loss 的 id 都是 0，就沒辦法逐筆對應，持有天數就做不出來。
+    # 兩個 detail API 都是用 id 對應。如果所有紀錄的 id 都是 0，就只拿得到第一筆的明細，
+    # 那「平均持有天數」（需要進場日）和「股利」（需要 ex_dividends）都做不出來。
+    if positions:
+        print("\n=== list_positions 每筆的 id（判斷能不能逐檔抓明細）===")
+        for p in positions:
+            print(
+                f"  id={getattr(p, 'id', None)!r} "
+                f"code={getattr(p, 'code', None)!r} "
+                f"quantity={getattr(p, 'quantity', None)!r}"
+            )
+        # 用最後一檔的 id 再試一次：如果回傳的 code 不是那一檔，就代表 id 沒有真的在選資料
+        last_pos = positions[-1]
+        detail = show(
+            f"list_position_detail 用最後一檔 {getattr(last_pos, 'code', '?')} 的 "
+            f"id={getattr(last_pos, 'id', None)!r} 再查一次",
+            lambda: api.list_position_detail(stock_account, getattr(last_pos, "id", 0)),
+            dump_first=False,
+        )
+        if detail:
+            codes = {getattr(d, "code", None) for d in detail}
+            expected = getattr(last_pos, "code", None)
+            print(f"  回傳的 code 集合: {codes}｜預期: {expected!r}")
+            print(
+                "  → id 有效，可逐檔查明細"
+                if codes == {expected}
+                else "  → id 無效（拿到的不是指定那一檔），逐檔明細做不到"
+            )
+
     if pnls:
         print("\n=== list_profit_loss 每筆的對應鍵（判斷能不能逐筆抓進場日）===")
         for p in pnls:
