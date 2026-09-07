@@ -723,10 +723,17 @@ function viewDashboard() {
 
   const cost = sumByCurrency(positions, (p) => p.totalCost);
   const unreal = {};
+  const value = {};
+  const valuedCost = {}; // 只累計「有現價因此估得出市值」的部位成本，報酬率才不會拿不同母體相比
   let missingQuotes = 0;
   for (const p of positions) {
-    if (p.unrealizedPnl === null) missingQuotes++;
-    else unreal[p.currency] = (unreal[p.currency] || 0) + p.unrealizedPnl;
+    if (p.unrealizedPnl === null) {
+      missingQuotes++;
+    } else {
+      unreal[p.currency] = (unreal[p.currency] || 0) + p.unrealizedPnl;
+      value[p.currency] = (value[p.currency] || 0) + p.marketValue;
+      valuedCost[p.currency] = (valuedCost[p.currency] || 0) + p.totalCost;
+    }
   }
   const realizedAll = sumByCurrency(lots, (l) => l.pnl);
   const thisYear = new Date().getFullYear();
@@ -741,7 +748,19 @@ function viewDashboard() {
     (d) => d.amount
   );
 
+  const mainCurrency = dominantCurrency(value);
+  const valueDominant = value[mainCurrency] || 0;
+  const costDominant = valuedCost[mainCurrency] || 0;
+  const returnPct = costDominant ? ((valueDominant - costDominant) / costDominant) * 100 : null;
+  const valueSub = [
+    `${positions.length - missingQuotes} 檔已估值`,
+    returnPct === null ? null : `報酬率 ${returnPct > 0 ? "+" : ""}${fmtNum(returnPct, 1)}%`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   const grid = el("div", { class: "stat-grid" }, [
+    statTile("目前市值", Object.keys(value).length ? fmtMultiLines(value) : "—", valueSub),
     statTile("持股成本", fmtMultiLines(cost), `${positions.length} 檔`),
     statTile(
       "未實現損益",
