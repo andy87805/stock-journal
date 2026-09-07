@@ -3,8 +3,9 @@
 這支腳本**不會下單、不會改單、不寫入 Firestore**，純粹讀取並印出結果。
 用途有兩個：
 1. 申請權限後確認金鑰真的可用（signed 狀態、正式環境權限）
-2. 確認 shioaji_sync.py 該用哪個 API——list_trades() 可能只回傳「透過 API 連線下的單」，
-   抓不到在永豐 App/網頁手動下的歷史成交，那種要用 list_profit_loss()
+2. 確認 shioaji_sync.py 該用哪個 API。已實測結論：list_trades() 只回傳「透過 API 連線下的
+   單」，抓不到在永豐 App/網頁手動下的成交（會是 0 筆），要用 list_positions() 與
+   list_profit_loss()。update_status() 需要「交易」權限，唯讀金鑰會拿到 401，屬預期。
 
 用法（PowerShell，金鑰從環境變數或參數帶入）：
     python sync/shioaji_selftest.py --api-key "你的KEY" --api-secret "你的SECRET"
@@ -22,7 +23,30 @@ from datetime import date, timedelta
 import shioaji as sj
 
 
-def show(label, fn):
+def dump_fields(obj, indent="      "):
+    """印出物件的完整欄位。
+
+    這些回傳物件的 repr 是簡寫的（例如 StockPosition 只顯示 5 個欄位），
+    但實際欄位更多，而要照著改寫同步腳本就得看到全部。
+    """
+    for attr in ("model_dump", "dict", "_asdict"):
+        fn = getattr(obj, attr, None)
+        if callable(fn):
+            try:
+                for k, v in fn().items():
+                    print(f"{indent}{k} = {v!r}")
+                return
+            except Exception:
+                pass
+    data = getattr(obj, "__dict__", None)
+    if data:
+        for k, v in data.items():
+            print(f"{indent}{k} = {v!r}")
+    else:
+        print(f"{indent}{obj!r}")
+
+
+def show(label, fn, dump_first=True):
     """呼叫一個帳務 API 並印出實際回傳的型別/筆數/欄位。
 
     每個呼叫都獨立 try/except：這些 API 的簽章沒有 docstring 可查，權限不足或參數
@@ -43,8 +67,14 @@ def show(label, fn):
             print(f"  - {item}")
         if len(result) > 3:
             print(f"  ...（其餘 {len(result) - 3} 筆略）")
+        if dump_first and result:
+            print(f"    第一筆的完整欄位（{type(result[0]).__name__}）:")
+            dump_fields(result[0])
     else:
         print(f"  {result}")
+        if dump_first:
+            print(f"    完整欄位（{type(result).__name__}）:")
+            dump_fields(result)
     return result
 
 
@@ -84,24 +114,41 @@ def main():
     end = date.today()
     begin = end - timedelta(days=args.days)
 
-    show("list_positions（目前庫存與成本）", lambda: api.list_positions(stock_account))
-    show(
+    positions = show("list_positions（目前庫存與成本）", lambda: api.list_positions(stock_account))
+    pnls = show(
         f"list_profit_loss（已實現損益 {begin} ~ {end}）",
         lambda: api.list_profit_loss(stock_account, begin.isoformat(), end.isoformat()),
     )
     show("list_settlements（交割金額）", lambda: api.list_settlements(stock_account))
 
-    # list_trades 前要先 update_status，否則通常是空的
-    show("update_status", lambda: api.update_status(stock_account))
-    trades = show("list_trades（注意：可能只有本次 API 連線下的單）", lambda: api.list_trades())
+    # 這兩個 detail API 決定我們能不能還原到「每一筆買賣」的粒度：
+    # 有進出場日期與單價才能算持有天數，也才有辦法保留交易級別的紀錄。
+    if positions:
+        first = positions[0]
+        show(
+            f"list_position_detail（{getattr(first, 'code', '?')} 的分筆庫存明細）",
+            lambda: api.list_position_detail(stock_account, getattr(first, "id", 0)),
+        )
+    if pnls:
+        first_pnl = pnls[0]
+        show(
+            f"list_profit_loss_detail（{getattr(first_pnl, 'code', '?')} 的損益明細）",
+            lambda: api.list_profit_loss_detail(stock_account, getattr(first_pnl, "id", 0)),
+        )
+    show(
+        f"list_profit_loss_summary（{begin} ~ {end} 彙總）",
+        lambda: api.list_profit_loss_summary(stock_account, begin.isoformat(), end.isoformat()),
+    )
 
     print("\n--- 判讀重點 ---")
-    if trades is not None and len(trades) == 0:
-        print("list_trades 是空的。如果你平常是用永豐 App/網頁手動下單，這就印證了它抓不到")
-        print("歷史成交，shioaji_sync.py 必須改用 list_profit_loss + list_positions。")
+    print("重點看 list_position_detail / list_profit_loss_detail 有沒有進出場日期與單價。")
     print("把以上輸出貼回來，我依實際回傳的欄位改寫 shioaji_sync.py。")
 
-    api.logout()
+    # logout 失敗只是連線收尾的問題，不影響上面已經取得的資料
+    try:
+        api.logout()
+    except Exception as exc:
+        print(f"\n(logout 收尾失敗，可忽略: {type(exc).__name__})")
 
 
 if __name__ == "__main__":
