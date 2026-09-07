@@ -121,6 +121,20 @@ def main():
     )
     show("list_settlements（交割金額）", lambda: api.list_settlements(stock_account))
 
+    # 平均持有天數要靠 list_profit_loss_detail 的進場日，而 detail 是用 id 對應的。
+    # 如果每筆 list_profit_loss 的 id 都是 0，就沒辦法逐筆對應，持有天數就做不出來。
+    if pnls:
+        print("\n=== list_profit_loss 每筆的對應鍵（判斷能不能逐筆抓進場日）===")
+        for p in pnls:
+            print(
+                f"  id={getattr(p, 'id', None)!r} "
+                f"code={getattr(p, 'code', None)!r} "
+                f"date={getattr(p, 'date', None)!r} "
+                f"quantity={getattr(p, 'quantity', None)!r} "
+                f"dseq={getattr(p, 'dseq', None)!r} "
+                f"seqno={getattr(p, 'seqno', None)!r}"
+            )
+
     # 這兩個 detail API 決定我們能不能還原到「每一筆買賣」的粒度：
     # 有進出場日期與單價才能算持有天數，也才有辦法保留交易級別的紀錄。
     if positions:
