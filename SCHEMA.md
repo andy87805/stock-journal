@@ -59,7 +59,7 @@ collection 名稱與欄位皆固定如下，改動前先更新本檔案。
 | sellPrice | number | 每股賣出價（`price`） |
 | pnl | number | 已實現損益。**已扣手續費與稅，而且已經含配息**，見下方說明 |
 | prRatio | number | 報酬率（`pr_ratio`）。原樣存。單位不明（可能是 % 也可能是小數），未經驗證前不要拿來運算或顯示 |
-| entryCost | number | 進場總成本 = `list_profit_loss_detail[].cost` 之和。未與正式環境的 `entry_cost` 逐筆比對過，可能是未扣配息的毛額 |
+| entryCost | number | 進場總成本 = `list_profit_loss_detail[].cost` 之和。已用正式環境資料比對確認**等於 `buy_cost`（已扣配息、已含買進手續費）**，不是 `entry_cost` 毛額。例：0050 為 37939 而非 39300 |
 | fee | number | `list_profit_loss_detail[].fee` 之和 |
 | tax | number | `list_profit_loss_detail[].tax` 之和 |
 | exDividendAmt | number | 持有期間配息 = `list_profit_loss_detail[].ex_dividend_amt` 之和。**只作獨立顯示，絕對不要加進 `pnl`** |

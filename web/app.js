@@ -734,8 +734,10 @@ function viewDashboard() {
     lots.filter((l) => l.sellDate.getFullYear() === thisYear),
     (l) => l.pnl
   );
-  const dividendYear = sumByCurrency(
-    state.dividends.filter((d) => d.payDate.getFullYear() === thisYear),
+  const brokerDividends = brokerDividendTotals();
+  const brokerDividendCount = brokerDividends.length;
+  const dividendTotal = sumByCurrency(
+    [...state.dividends, ...brokerDividends],
     (d) => d.amount
   );
 
@@ -759,20 +761,39 @@ function viewDashboard() {
       `${lots.length} 筆平倉`,
       pnlClass(realizedAll[dominantCurrency(realizedAll)] || 0)
     ),
-    statTile(`${thisYear} 股利`, fmtMultiLines(dividendYear), `${state.dividends.length} 筆紀錄`),
+    // 永豐配息沒有發放日期，無法歸到某一年，所以這裡用累計而不是年度，
+    // 否則明明有幾十萬配息卻顯示「今年 NT$0」，會讓人以為資料沒同步到。
+    statTile(
+      "累計配息",
+      fmtMultiLines(dividendTotal),
+      brokerDividendCount
+        ? `永豐 ${brokerDividendCount} 檔（無日期）· 手動 ${state.dividends.length} 筆`
+        : `${state.dividends.length} 筆紀錄`
+    ),
   ]);
   frag.appendChild(grid);
 
-  const recent = state.trades.slice(0, 5);
+  const recentRealized = allRealized().slice(0, 5);
   frag.appendChild(
     box(
-      "最近交易",
-      recent.length
-        ? recent.map(tradeRow)
-        : blankslate("尚無交易紀錄", "等待同步腳本寫入，或手動新增一筆"),
-      el("a", { href: "#/trades", text: "全部", class: "mono" })
+      "最近平倉",
+      recentRealized.length
+        ? recentRealized.map(realizedRow)
+        : blankslate("尚無平倉紀錄"),
+      el("a", { href: "#/realized", text: "全部", class: "mono" })
     )
   );
+
+  const recentManual = state.trades.slice(0, 3);
+  if (recentManual.length) {
+    frag.appendChild(
+      box(
+        "最近手動交易",
+        recentManual.map(tradeRow),
+        el("a", { href: "#/trades", text: "全部", class: "mono" })
+      )
+    );
+  }
 
   const now = Date.now();
   const upcoming = state.events.filter((e) => e.eventDate.getTime() >= now - DAY_MS).slice(0, 5);
@@ -924,9 +945,14 @@ function viewTrades() {
 
   const list = state.trades.length
     ? state.trades.map(tradeRowInteractive)
-    : [blankslate("尚無交易紀錄", "永豐同步會自動寫入，美股目前請手動新增")];
+    : [
+        blankslate(
+          "這裡只放手動輸入的交易",
+          "永豐沒有提供逐筆成交的 API，台股資料請看「持股」與「已實現」兩頁。這一頁用來記錄同步抓不到的交易，例如美股。"
+        ),
+      ];
 
-  const b = box("交易紀錄", [form, ...list], addBtn);
+  const b = box("手動交易", [form, ...list], addBtn);
   frag.appendChild(b);
   return frag;
 }
