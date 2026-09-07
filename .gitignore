@@ -21,5 +21,8 @@ GoogleService-Info.plist
 __pycache__/
 *.pyc
 
+# shioaji SDK 自動產生的 log（含 session/token 相關訊息）
+*.log
+
 # macOS
 .DS_Store

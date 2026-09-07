@@ -11,6 +11,7 @@ from pathlib import Path
 
 import firebase_admin
 from firebase_admin import credentials, firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 BASE_DIR = Path(__file__).parent
 SERVICE_ACCOUNT_FILE = BASE_DIR / "config" / "firebase-service-account.json"
@@ -86,6 +87,54 @@ def upsert_calendar_event(db, event: dict):
     doc_id = f"{event['symbol']}_{event['type']}_{date_only}"
     data = dict(event)
     db.collection("calendarEvents").document(doc_id).set(data, merge=True)
+    return doc_id
+
+
+def replace_positions(db, broker: str, positions: list[dict]):
+    """整批覆蓋某個 broker 的庫存。
+
+    庫存是「當下狀態」而不是歷史紀錄：賣光的部位必須從 Firestore 消失，
+    所以這裡不能只 upsert，要把這次沒出現的舊 doc 刪掉。
+    """
+    written = set()
+    for pos in positions:
+        doc_id = f"{broker}_{pos['symbol']}_{pos.get('cond', 'Cash')}"
+        data = dict(pos)
+        data["broker"] = broker
+        data["syncedAt"] = _now_iso()
+        db.collection("positions").document(doc_id).set(data)
+        written.add(doc_id)
+
+    stale = 0
+    for doc in db.collection("positions").where(filter=FieldFilter("broker", "==", broker)).stream():
+        if doc.id not in written:
+            doc.reference.delete()
+            stale += 1
+    return len(written), stale
+
+
+def upsert_realized(db, broker: str, record: dict):
+    """已實現損益是歷史事實，只增不刪。dseq 實測唯一，加日期防跨年重複。"""
+    doc_id = f"{broker}_{record['sellDate']}_{record['dseq']}"
+    data = dict(record)
+    data["broker"] = broker
+    data["syncedAt"] = _now_iso()
+    db.collection("realized").document(doc_id).set(data, merge=True)
+    return doc_id
+
+
+def upsert_quote(db, market: str, symbol: str, price: float, source: str):
+    doc_id = f"{market}:{symbol}"
+    db.collection("quotes").document(doc_id).set(
+        {
+            "symbol": symbol,
+            "market": market,
+            "price": price,
+            "source": source,
+            "updatedAt": _now_iso(),
+        },
+        merge=True,
+    )
     return doc_id
 
 
