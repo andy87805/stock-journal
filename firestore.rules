@@ -1,28 +1,43 @@
 rules_version = '2';
 
-// 這是單人個人專案的規則，刻意寫得很簡單：
-// - 唯一會用到這組規則的 client 是 iOS App 自己的匿名登入 (anonymous auth) session
-// - Python 同步腳本用 Firebase Admin SDK + 服務帳戶金鑰寫入，Admin SDK 完全繞過
-//   Security Rules，不受這裡的規則限制
-// 所以「只要求已登入」就足夠，不需要依 UID 做細緻的 per-user 隔離。
-// 這不是給多人/公開產品用的規則設計，複製到其他專案前請重新評估。
+// 單人個人專案的規則。PWA 放在公開網址（GitHub Pages）上，任何人都拿得到
+// web/firebase-config.js 裡的專案設定，所以「只要求已登入」是不夠的——任何人
+// 都能自己註冊/匿名登入然後讀走交易資料。這裡把讀寫權限綁死在唯一那一個帳號的 UID。
+//
+// Python 同步腳本走 Firebase Admin SDK + 服務帳戶金鑰，Admin SDK 完全繞過
+// Security Rules，不受這裡限制，所以不需要為它開任何權限。
+//
+// 設定方式：在 Firebase Console → Authentication → Users 建立自己的帳號後，
+// 把該列顯示的 User UID 填進下面的 OWNER_UID，然後重新部署：
+//   firebase deploy --only firestore:rules
+// 沒填之前一律拒絕（預設安全），登入後會讀不到任何資料。
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    function ownerOnly() {
+      // TODO: 換成 Firebase Console → Authentication → Users 裡的 User UID
+      let OWNER_UID = 'REPLACE_WITH_YOUR_FIREBASE_UID';
+      return request.auth != null && request.auth.uid == OWNER_UID;
+    }
+
     match /trades/{tradeId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if ownerOnly();
     }
 
     match /dividends/{dividendId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if ownerOnly();
     }
 
     match /calendarEvents/{eventId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if ownerOnly();
+    }
+
+    match /quotes/{quoteId} {
+      allow read, write: if ownerOnly();
     }
 
     match /syncMeta/{broker} {
-      allow read, write: if request.auth != null;
+      allow read, write: if ownerOnly();
     }
   }
 }

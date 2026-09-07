@@ -5,18 +5,8 @@ config/
 *service-account*.json
 sync/.localcert/
 
-# iOS build 產物
-*.ipa
-ios/*.xcodeproj/
-ios/DerivedData/
+# 舊 iOS 方案殘留（已改用 PWA，這個檔案現在沒用途但還在磁碟上）
 GoogleService-Info.plist
-ios/Sources/GoogleService-Info.plist
-ios-build/output/
-
-# fastlane
-fastlane/report.xml
-fastlane/Preview.html
-ios-build/publish/
 
 # Python
 __pycache__/

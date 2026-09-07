@@ -20,6 +20,9 @@ jobs:
       SCHWAB_CLIENT_SECRET: ${{ secrets.SCHWAB_CLIENT_SECRET }}
       SCHWAB_REFRESH_TOKEN: ${{ secrets.SCHWAB_REFRESH_TOKEN }}
       FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
     steps:
       - uses: actions/checkout@v4
 
@@ -46,7 +49,14 @@ jobs:
         continue-on-error: true
         run: python sync/calendar_sync.py
 
-      # 前面三步都設了 continue-on-error，job 本身不會因此變紅
+      # 這個 workflow 一天跑兩次（台股收盤 + 美股收盤），提醒信只在台股那一輪寄，避免一天兩封
+      - name: Send calendar reminders (除權息/財報提醒信)
+        id: reminders
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '35 5 * * 1-5'
+        continue-on-error: true
+        run: python sync/send_reminders.py
+
+      # 前面幾步都設了 continue-on-error，job 本身不會因此變紅
       # 這一步手動檢查有沒有任一步失敗，有的話讓 job 失敗
       # 好處：GitHub 內建的失敗通知信才會正常觸發
       - name: Check for failures
@@ -54,7 +64,8 @@ jobs:
         run: |
           if [ "${{ steps.shioaji.outcome }}" = "failure" ] || \
              [ "${{ steps.schwab.outcome }}" = "failure" ] || \
-             [ "${{ steps.calendar.outcome }}" = "failure" ]; then
+             [ "${{ steps.calendar.outcome }}" = "failure" ] || \
+             [ "${{ steps.reminders.outcome }}" = "failure" ]; then
             echo "至少一支同步腳本失敗，詳見上方對應步驟的 log"
             exit 1
           fi

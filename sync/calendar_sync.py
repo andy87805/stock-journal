@@ -21,6 +21,30 @@ TWSE_EX_DIVIDEND_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap45_L"
 FINNHUB_EARNINGS_URL = "https://finnhub.io/api/v1/calendar/earnings"
 
 
+def normalize_date(raw):
+    """把各種來源的日期統一成 SCHEMA.md 規定的 YYYY-MM-DD。
+
+    TWSE 開放資料的日期格式不固定，實測可能是民國年（1150915、115/09/15）或西元（20260915），
+    直接原樣寫進 Firestore 會讓前端的 Date 解析和提醒信的字串範圍查詢全部失效。
+    解析不出來就回 None，由呼叫端跳過該筆，不寫入無法查詢的髒資料。
+    """
+    if not raw:
+        return None
+    s = str(raw).strip().replace("/", "").replace("-", "")
+    if not s.isdigit():
+        return None
+    if len(s) == 8:
+        year, month, day = int(s[0:4]), int(s[4:6]), int(s[6:8])
+    elif len(s) == 7:
+        year, month, day = int(s[0:3]) + 1911, int(s[3:5]), int(s[5:7])
+    else:
+        return None
+    try:
+        return datetime(year, month, day).date().isoformat()
+    except ValueError:
+        return None
+
+
 def generate_dry_run_events():
     today = datetime.now(timezone.utc).date().isoformat()
     return [
@@ -53,7 +77,7 @@ def fetch_tw_ex_dividend_events(tw_symbols):
     events = []
     for row in raw:
         symbol = row.get("公司代號") or row.get("Code")
-        ex_date = row.get("除權除息交易日") or row.get("ExDividendTradingDate")
+        ex_date = normalize_date(row.get("除權除息交易日") or row.get("ExDividendTradingDate"))
         if symbol not in tw_symbols or not ex_date:
             continue
         events.append(
@@ -82,12 +106,15 @@ def fetch_us_earnings_events(us_symbols, api_key):
         resp.raise_for_status()
         raw = resp.json()
         for item in raw.get("earningsCalendar", []):
+            event_date = normalize_date(item.get("date"))
+            if not event_date:
+                continue
             events.append(
                 {
                     "symbol": item.get("symbol", symbol),
                     "market": "US",
                     "type": "earnings",
-                    "eventDate": item.get("date"),
+                    "eventDate": event_date,
                 }
             )
     return events

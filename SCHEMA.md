@@ -7,7 +7,7 @@
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
-| broker | string | `"sinopac"` \| `"schwab"` |
+| broker | string | `"sinopac"` \| `"schwab"` \| `"manual"`（App 內手動新增） |
 | symbol | string | 股票代號，台股純數字如 `"2330"`，美股 ticker 如 `"AAPL"` |
 | market | string | `"TW"` \| `"US"` |
 | side | string | `"buy"` \| `"sell"` |
@@ -41,8 +41,20 @@
 | symbol | string | |
 | market | string | |
 | type | string | `"exDividend"` \| `"earnings"` |
-| eventDate | string | ISO8601（僅日期部分有意義） |
+| eventDate | string | `YYYY-MM-DD`。**寫入前一定要正規化**：TWSE 開放資料可能給民國年（`1150915`、`115/09/15`）或 `20260915`，原樣寫進去會讓前端解析與提醒信的字串範圍查詢全部失效。`calendar_sync.py` 的 `normalize_date()` 負責轉換，轉不出來就跳過該筆 |
 | note | string? | |
+
+## collection: `quotes`
+現價，用來算未實現損益。document ID = `{market}:{symbol}`（例如 `TW:2330`）。
+目前沒有免費且允許瀏覽器直連（CORS）的行情來源，所以由使用者在 App 的「持股」頁手動填，存進 Firestore 後跨裝置共用。
+之後若要自動化，寫一支腳本更新同一個 collection 即可，前端不用改。
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| symbol | string | |
+| market | string | |
+| price | number | 每股現價 |
+| updatedAt | string | ISO8601 |
 
 ## collection: `syncMeta`
 document ID = broker 名稱（`"sinopac"` / `"schwab"` / `"calendar"`）。
@@ -54,7 +66,7 @@ document ID = broker 名稱（`"sinopac"` / `"schwab"` / `"calendar"`）。
 
 ## 不落地的資料（App 端計算，不寫回 Firestore）
 
-- **持股庫存/成本均價/未實現損益**：App 讀取 `trades` 後，用移動平均法即時算，不存 Firestore
+- **持股庫存/成本均價/未實現損益**：前端讀取 `trades` 後，用移動平均法即時算，不存 Firestore（未實現損益另外需要 `quotes` 的現價）
 - **已實現損益**：同上，賣出當下用當時移動平均成本計算
 - **勝率/盈虧比/平均持有天數**：由已實現損益紀錄衍生計算
 - 這樣設計是為了避免 App 端與同步腳本各自維護一份庫存邏輯而互相打架；`trades` 是唯一真實來源 (source of truth)
@@ -62,4 +74,4 @@ document ID = broker 名稱（`"sinopac"` / `"schwab"` / `"calendar"`）。
 ## 認證
 
 - Python 端：用 Firebase Admin SDK + 服務帳戶 JSON（`FIREBASE_SERVICE_ACCOUNT` secret），有完整讀寫權限，不受 Security Rules 限制
-- iOS 端：用 Firebase Auth **匿名登入**（單一使用者，不需要註冊畫面），Firestore Security Rules 僅允許該匿名 UID 讀寫（規則檔案見 `firestore.rules`）
+- PWA 端：用 Firebase Auth **Email/Password**，只開一個帳號。因為 PWA 在公開網址上，匿名登入等於門戶大開，所以 `firestore.rules` 把讀寫綁死在那一個 UID（`OWNER_UID`）

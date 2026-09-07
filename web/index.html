@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>StockJournal</title>
+    <meta name="theme-color" content="#161b22" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="StockJournal" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="icons/icon-192.png" />
+    <link rel="icon" href="icons/icon-192.png" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="auth-gate" id="authGate">
+      <div class="auth-card">
+        <div class="brand">
+          <svg height="48" viewBox="0 0 16 16" width="48" aria-hidden="true">
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+            ></path>
+          </svg>
+          <div>StockJournal</div>
+        </div>
+        <div class="box">
+          <div class="box-body">
+            <div class="auth-error hidden" id="authError"></div>
+            <form id="authForm">
+              <div class="field">
+                <label for="authEmail">Email</label>
+                <input
+                  type="email"
+                  id="authEmail"
+                  autocomplete="username"
+                  required
+                />
+              </div>
+              <div class="field">
+                <label for="authPassword">密碼</label>
+                <input
+                  type="password"
+                  id="authPassword"
+                  autocomplete="current-password"
+                  required
+                />
+              </div>
+              <button type="submit" class="btn btn-primary" style="width: 100%">
+                登入
+              </button>
+            </form>
+          </div>
+        </div>
+        <div class="blankslate" style="padding: 12px; font-size: 12px">
+          單一使用者專用，帳號在 Firebase Console 建立
+        </div>
+      </div>
+    </div>
+
+    <header class="app-header hidden" id="appHeader">
+      <svg class="logo" height="22" viewBox="0 0 16 16" width="22" aria-hidden="true">
+        <path
+          d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+        ></path>
+      </svg>
+      <div class="title">stock<span>-journal</span></div>
+      <span class="sync-badge" id="syncBadge">—</span>
+      <button class="icon-btn" id="themeBtn" title="切換佈景">◐</button>
+      <button class="icon-btn" id="signOutBtn" title="登出">⏻</button>
+    </header>
+
+    <nav class="tabnav hidden" id="tabnav">
+      <a href="#/" data-route="/">總覽</a>
+      <a href="#/positions" data-route="/positions">持股</a>
+      <a href="#/trades" data-route="/trades">交易紀錄</a>
+      <a href="#/realized" data-route="/realized">已實現</a>
+      <a href="#/chart" data-route="/chart">損益走勢</a>
+      <a href="#/exposure" data-route="/exposure">曝險</a>
+      <a href="#/stats" data-route="/stats">統計</a>
+      <a href="#/dividends" data-route="/dividends">股利</a>
+      <a href="#/reminders" data-route="/reminders">提醒</a>
+      <a href="#/report" data-route="/report">報表</a>
+    </nav>
+
+    <main id="view" class="hidden"></main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
