@@ -19,6 +19,16 @@ service cloud.firestore {
       return request.auth != null && request.auth.uid == OWNER_UID;
     }
 
+    // 新增 collection 時一定要同步加這裡：Firestore 對沒有 match 到的路徑一律拒絕，
+    // 前端會收到 permission-denied 而不是空資料，看起來像同步壞掉。
+    match /positions/{positionId} {
+      allow read, write: if ownerOnly();
+    }
+
+    match /realized/{realizedId} {
+      allow read, write: if ownerOnly();
+    }
+
     match /trades/{tradeId} {
       allow read, write: if ownerOnly();
     }
