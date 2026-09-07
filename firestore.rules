@@ -15,8 +15,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     function ownerOnly() {
-      // TODO: 換成 Firebase Console → Authentication → Users 裡的 User UID
-      let OWNER_UID = 'REPLACE_WITH_YOUR_FIREBASE_UID';
+      let OWNER_UID = 'czOCfZWUr5WunUdv5UCpJ9zRPef1';
       return request.auth != null && request.auth.uid == OWNER_UID;
     }
 
