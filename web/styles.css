@@ -245,6 +245,10 @@ main {
   flex-shrink: 0;
 }
 
+.nw {
+  white-space: nowrap;
+}
+
 /* stat grid */
 
 .stat-grid {
@@ -311,6 +315,17 @@ main {
   color: var(--success);
   border-color: color-mix(in srgb, var(--success) 40%, transparent);
   background: color-mix(in srgb, var(--success) 10%, transparent);
+}
+
+/* 資料來源標記：券商算好的 vs 前端自己算的 */
+.label-pill.src-sinopac {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.label-pill.src-manual {
+  color: var(--fg-subtle);
+  border-style: dashed;
 }
 
 .label-pill.accent {
@@ -450,6 +465,16 @@ textarea:focus {
   padding: 3px 6px;
   font-size: 13px;
   text-align: right;
+}
+
+/* 永豐部位的現價由券商給，佔位寬度和手填欄位對齊 */
+.price-static {
+  width: 92px;
+  padding: 3px 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-align: right;
+  white-space: nowrap;
 }
 
 /* blankslate */

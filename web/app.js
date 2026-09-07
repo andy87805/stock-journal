@@ -22,6 +22,8 @@ const auth = getAuth(app);
 const db = initializeFirestore(app, { localCache: persistentLocalCache() });
 
 const state = {
+  positions: [],
+  realized: [],
   trades: [],
   dividends: [],
   events: [],
@@ -218,10 +220,117 @@ const marketValue = (p) => {
   return q && q.price ? p.shares * q.price : null;
 };
 
-const unrealized = (p) => {
-  const mv = marketValue(p);
-  return mv === null ? null : mv - p.shares * p.avgCost;
-};
+/* ---------- 兩種來源合併 ---------- */
+
+const SOURCE_LABEL = { sinopac: "永豐", manual: "手動" };
+const COND_LABEL = { Cash: "現股", MarginTrading: "融資", ShortSelling: "融券" };
+
+// 永豐給的是券商算好的結果，直接採用，不重算；手動交易則走移動平均法。
+// marketValue / unrealizedPnl 為 null 代表「沒有現價所以算不出來」，和 0 是兩回事。
+function allPositions() {
+  const out = state.positions.map((p) => ({
+    source: "sinopac",
+    symbol: p.symbol,
+    market: p.market,
+    currency: p.currency,
+    // 零股的 lots 是 0，用 lots × 1000 回推股數會得到 0，只能用金額回推
+    shares: p.avgPrice > 0 ? p.totalCost / p.avgPrice : null,
+    avgCost: p.avgPrice,
+    totalCost: p.totalCost,
+    lastPrice: p.lastPrice || null,
+    marketValue: p.marketValue,
+    unrealizedPnl: p.unrealizedPnl,
+    exDividends: p.exDividends,
+    earliestEntryDate: p.earliestEntryDate,
+    cond: p.cond,
+  }));
+
+  for (const p of computeBook(state.trades).positions) {
+    const mv = marketValue(p);
+    const q = state.quotes[`${p.market}:${p.symbol}`];
+    out.push({
+      source: "manual",
+      symbol: p.symbol,
+      market: p.market,
+      currency: p.currency,
+      shares: p.shares,
+      avgCost: p.avgCost,
+      totalCost: p.shares * p.avgCost,
+      lastPrice: q && q.price ? q.price : null,
+      marketValue: mv,
+      unrealizedPnl: mv === null ? null : mv - p.shares * p.avgCost,
+      exDividends: 0,
+      earliestEntryDate: p.openedAt,
+      cond: null,
+    });
+  }
+
+  out.sort((a, b) => b.totalCost - a.totalCost);
+  return out;
+}
+
+function allRealized() {
+  const out = state.realized.map((r) => ({
+    source: "sinopac",
+    symbol: r.symbol,
+    market: r.market,
+    currency: r.currency,
+    sellDate: r.sellDate,
+    pnl: r.pnl,
+    costBasis: r.entryCost,
+    // 券商只給每股賣出價，沒有賣出總額，不硬湊
+    proceeds: null,
+    sellPrice: r.sellPrice,
+    quantity: null,
+    holdingDays: r.holdingDays,
+    exDividendAmt: r.exDividendAmt,
+  }));
+
+  for (const l of computeBook(state.trades).lots) {
+    out.push({
+      source: "manual",
+      symbol: l.symbol,
+      market: l.market,
+      currency: l.currency,
+      sellDate: l.sellDate,
+      pnl: l.realizedPnL,
+      costBasis: l.costBasis,
+      proceeds: l.proceeds,
+      sellPrice: null,
+      quantity: l.quantity,
+      holdingDays: l.holdingDays,
+      exDividendAmt: 0,
+    });
+  }
+
+  out.sort((a, b) => b.sellDate - a.sellDate);
+  return out;
+}
+
+// 永豐沒有股利 API，配息只能拿到「累計金額」：庫存的 exDividends 與平倉的 exDividendAmt。
+function brokerDividendTotals() {
+  const bySymbol = new Map();
+  const add = (r, amount, kind) => {
+    if (!amount) return;
+    const key = `${r.market}:${r.symbol}`;
+    if (!bySymbol.has(key)) {
+      bySymbol.set(key, {
+        symbol: r.symbol,
+        market: r.market,
+        currency: r.currency,
+        amount: 0,
+        holding: 0,
+        closed: 0,
+      });
+    }
+    const s = bySymbol.get(key);
+    s.amount += amount;
+    s[kind] += amount;
+  };
+  for (const p of state.positions) add(p, p.exDividends, "holding");
+  for (const r of state.realized) add(r, r.exDividendAmt, "closed");
+  return [...bySymbol.values()].sort((a, b) => b.amount - a.amount);
+}
 
 /* ---------- firestore ---------- */
 
@@ -243,7 +352,59 @@ function normalizeTrade(id, d) {
   };
 }
 
+function normalizePosition(id, d) {
+  return {
+    id,
+    broker: d.broker || "sinopac",
+    symbol: String(d.symbol ?? ""),
+    market: d.market || "TW",
+    currency: d.currency || "TWD",
+    avgPrice: Number(d.avgPrice) || 0,
+    lastPrice: Number(d.lastPrice) || 0,
+    totalCost: Number(d.totalCost) || 0,
+    marketValue: Number(d.marketValue) || 0,
+    unrealizedPnl: Number(d.unrealizedPnl) || 0,
+    exDividends: Number(d.exDividends) || 0,
+    earliestEntryDate: parseDate(d.earliestEntryDate),
+    cond: d.cond || "Cash",
+  };
+}
+
+function normalizeRealized(id, d) {
+  return {
+    id,
+    broker: d.broker || "sinopac",
+    symbol: String(d.symbol ?? ""),
+    market: d.market || "TW",
+    currency: d.currency || "TWD",
+    sellDate: parseDate(d.sellDate) || new Date(0),
+    sellPrice: Number(d.sellPrice) || 0,
+    pnl: Number(d.pnl) || 0,
+    entryCost: Number(d.entryCost) || 0,
+    fee: Number(d.fee) || 0,
+    tax: Number(d.tax) || 0,
+    exDividendAmt: Number(d.exDividendAmt) || 0,
+    entryDate: parseDate(d.entryDate),
+    // 券商算不出加權平均進場日時 entryDate / holdingDays 都會缺，不補估計值
+    holdingDays:
+      d.holdingDays === null || d.holdingDays === undefined || d.holdingDays === ""
+        ? null
+        : Number(d.holdingDays),
+  };
+}
+
 function subscribe() {
+  onSnapshot(collection(db, "positions"), (snap) => {
+    state.positions = snap.docs.map((d) => normalizePosition(d.id, d.data()));
+    render();
+  });
+
+  onSnapshot(collection(db, "realized"), (snap) => {
+    state.realized = snap.docs.map((d) => normalizeRealized(d.id, d.data()));
+    state.realized.sort((a, b) => b.sellDate - a.sellDate);
+    render();
+  });
+
   onSnapshot(collection(db, "trades"), (snap) => {
     state.trades = snap.docs.map((d) => normalizeTrade(d.id, d.data()));
     state.trades.sort((a, b) => b.tradeDate - a.tradeDate);
@@ -521,6 +682,16 @@ const statTile = (label, value, sub, cls) => {
   ]);
 };
 
+// 每段各自 nowrap：窄螢幕只在段落之間換行，不會把金額或中文詞彙切一半
+const subLine = (parts, cls = "row-sub mono") => {
+  const node = el("div", { class: cls });
+  parts.filter(Boolean).forEach((p, i) => {
+    if (i) node.appendChild(document.createTextNode(" · "));
+    node.appendChild(el("span", { class: "nw", text: p }));
+  });
+  return node;
+};
+
 const segmented = (options, current, onChange) => {
   const wrap = el("div", { class: "seg" });
   for (const [value, label] of options) {
@@ -546,22 +717,22 @@ const viewOptions = {
 };
 
 function viewDashboard() {
-  const { positions, lots } = computeBook(state.trades);
+  const positions = allPositions();
+  const lots = allRealized();
   const frag = document.createDocumentFragment();
 
-  const cost = sumByCurrency(positions, (p) => p.shares * p.avgCost);
+  const cost = sumByCurrency(positions, (p) => p.totalCost);
   const unreal = {};
   let missingQuotes = 0;
   for (const p of positions) {
-    const u = unrealized(p);
-    if (u === null) missingQuotes++;
-    else unreal[p.currency] = (unreal[p.currency] || 0) + u;
+    if (p.unrealizedPnl === null) missingQuotes++;
+    else unreal[p.currency] = (unreal[p.currency] || 0) + p.unrealizedPnl;
   }
-  const realizedAll = sumByCurrency(lots, (l) => l.realizedPnL);
+  const realizedAll = sumByCurrency(lots, (l) => l.pnl);
   const thisYear = new Date().getFullYear();
   const realizedYear = sumByCurrency(
     lots.filter((l) => l.sellDate.getFullYear() === thisYear),
-    (l) => l.realizedPnL
+    (l) => l.pnl
   );
   const dividendYear = sumByCurrency(
     state.dividends.filter((d) => d.payDate.getFullYear() === thisYear),
@@ -573,7 +744,7 @@ function viewDashboard() {
     statTile(
       "未實現損益",
       Object.keys(unreal).length ? fmtMultiLines(unreal) : "—",
-      missingQuotes ? `${missingQuotes} 檔未填現價` : "已全部估值",
+      missingQuotes ? `${missingQuotes} 檔手動部位未填現價` : "已全部估值",
       pnlClass(unreal[dominantCurrency(unreal)] || 0)
     ),
     statTile(
@@ -656,60 +827,87 @@ function eventRow(e) {
   ]);
 }
 
+function positionRow(p) {
+  const u = p.unrealizedPnl;
+  const pct = u !== null && p.totalCost ? (u / p.totalCost) * 100 : null;
+
+  const subs = [
+    subLine([`${p.shares === null ? "—" : fmtNum(p.shares, 0)} 股`, `均價 ${fmtNum(p.avgCost)}`]),
+    subLine([
+      `成本 ${fmtMoney(p.totalCost, p.currency)}`,
+      p.marketValue === null ? null : `市值 ${fmtMoney(p.marketValue, p.currency)}`,
+    ]),
+  ];
+
+  if (p.source === "sinopac" && (p.earliestEntryDate || p.exDividends)) {
+    subs.push(
+      subLine(
+        [
+          p.earliestEntryDate ? `最早進場 ${fmtDate(p.earliestEntryDate)}` : null,
+          p.exDividends ? `累計配息 ${fmtMoney(p.exDividends, p.currency)}` : null,
+        ],
+        "row-sub"
+      )
+    );
+  }
+
+  const priceNode =
+    p.source === "manual"
+      ? el("input", {
+          class: "price-input mono",
+          type: "number",
+          step: "0.01",
+          inputmode: "decimal",
+          placeholder: "現價",
+          value: p.lastPrice ? String(p.lastPrice) : "",
+          onchange: (ev) => {
+            const v = parseFloat(ev.target.value);
+            if (!isNaN(v) && v > 0) saveQuote(p.market, p.symbol, v);
+          },
+        })
+      : el("div", { class: "price-static mono", text: `現價 ${fmtNum(p.lastPrice)}` });
+
+  return el("div", { class: "box-row" }, [
+    el("div", { class: "row-main" }, [
+      el("div", { class: "row-title" }, [
+        el("span", { class: "mono", text: p.symbol }),
+        el("span", { class: "label-pill", text: p.market }),
+        el("span", { class: `label-pill src-${p.source}`, text: SOURCE_LABEL[p.source] }),
+        p.cond && p.cond !== "Cash"
+          ? el("span", { class: "label-pill", text: COND_LABEL[p.cond] || p.cond })
+          : null,
+      ]),
+      ...subs,
+    ]),
+    el("div", { class: "row-right" }, [
+      priceNode,
+      el("div", {
+        class: `mono ${u === null ? "muted" : pnlClass(u)}`,
+        text:
+          u === null
+            ? "—"
+            : `${fmtMoney(u, p.currency)}${pct === null ? "" : ` (${pct > 0 ? "+" : ""}${fmtNum(pct, 1)}%)`}`,
+      }),
+    ]),
+  ]);
+}
+
 function viewPositions() {
-  const { positions } = computeBook(state.trades);
+  const positions = allPositions();
   if (!positions.length) return box("持股庫存", blankslate("目前沒有持股"));
 
-  const rows = positions.map((p) => {
-    const key = `${p.market}:${p.symbol}`;
-    const q = state.quotes[key];
-    const u = unrealized(p);
-    const costTotal = p.shares * p.avgCost;
-    const pct = u !== null && costTotal ? (u / costTotal) * 100 : null;
-
-    const priceInput = el("input", {
-      class: "price-input mono",
-      type: "number",
-      step: "0.01",
-      inputmode: "decimal",
-      placeholder: "現價",
-      value: q && q.price ? String(q.price) : "",
-      onchange: (ev) => {
-        const v = parseFloat(ev.target.value);
-        if (!isNaN(v) && v > 0) saveQuote(p.market, p.symbol, v);
-      },
-    });
-
-    return el("div", { class: "box-row" }, [
-      el("div", { class: "row-main" }, [
-        el("div", { class: "row-title" }, [
-          el("span", { class: "mono", text: p.symbol }),
-          el("span", { class: "label-pill", text: p.market }),
-        ]),
-        el("div", {
-          class: "row-sub mono",
-          text: `${fmtNum(p.shares, 0)} 股 · 均價 ${fmtNum(p.avgCost)}`,
-        }),
-        el("div", { class: "row-sub mono", text: `成本 ${fmtMoney(costTotal, p.currency)}` }),
-      ]),
-      el("div", { class: "row-right" }, [
-        priceInput,
-        el("div", {
-          class: `mono ${u === null ? "muted" : pnlClass(u)}`,
-          text: u === null ? "—" : `${fmtMoney(u, p.currency)}${pct === null ? "" : ` (${pct > 0 ? "+" : ""}${fmtNum(pct, 1)}%)`}`,
-        }),
-      ]),
-    ]);
-  });
+  const missing = positions.filter((p) => p.source === "manual" && p.marketValue === null);
 
   const frag = document.createDocumentFragment();
-  frag.appendChild(
-    el("div", {
-      class: "flash",
-      text: "未實現損益需要現價：在右側欄位填入即可，會存進 Firestore 跨裝置共用。",
-    })
-  );
-  frag.appendChild(box("持股庫存", rows));
+  if (missing.length) {
+    frag.appendChild(
+      el("div", {
+        class: "flash",
+        text: `${missing.length} 檔手動部位缺現價，未實現損益算不出來：在右側欄位填入即可，會存進 Firestore 跨裝置共用。永豐部位的現價由同步腳本寫入。`,
+      })
+    );
+  }
+  frag.appendChild(box("持股庫存", positions.map(positionRow)));
   return frag;
 }
 
@@ -862,11 +1060,38 @@ function openTradeDetail(t) {
   );
 }
 
+function realizedRow(l) {
+  const parts = [fmtDate(l.sellDate)];
+  if (l.quantity !== null) parts.push(`${fmtNum(l.quantity, 0)} 股`);
+  parts.push(`成本 ${fmtMoney(l.costBasis, l.currency)}`);
+  if (l.proceeds !== null) parts.push(`收 ${fmtMoney(l.proceeds, l.currency)}`);
+  else if (l.sellPrice) parts.push(`賣價 ${fmtNum(l.sellPrice)}`);
+  if (l.exDividendAmt) parts.push(`配息 ${fmtMoney(l.exDividendAmt, l.currency)}`);
+
+  return el("div", { class: "box-row" }, [
+    el("div", { class: "row-main" }, [
+      el("div", { class: "row-title" }, [
+        el("span", { class: "mono", text: l.symbol }),
+        el("span", { class: "label-pill", text: l.market }),
+        el("span", { class: `label-pill src-${l.source}`, text: SOURCE_LABEL[l.source] }),
+      ]),
+      subLine(parts),
+    ]),
+    el("div", { class: "row-right" }, [
+      el("div", { class: `mono ${pnlClass(l.pnl)}`, text: fmtMoney(l.pnl, l.currency) }),
+      el("div", {
+        class: "row-sub mono",
+        text: l.holdingDays === null ? "持有天數不明" : `持有 ${l.holdingDays} 天`,
+      }),
+    ]),
+  ]);
+}
+
 function viewRealized() {
-  const { lots } = computeBook(state.trades);
+  const lots = allRealized();
   if (!lots.length) return box("已實現損益", blankslate("尚無平倉紀錄"));
 
-  const total = sumByCurrency(lots, (l) => l.realizedPnL);
+  const total = sumByCurrency(lots, (l) => l.pnl);
   const frag = document.createDocumentFragment();
   frag.appendChild(
     el("div", { class: "stat-grid" }, [
@@ -874,29 +1099,7 @@ function viewRealized() {
     ])
   );
 
-  const rows = lots.map((l) =>
-    el("div", { class: "box-row" }, [
-      el("div", { class: "row-main" }, [
-        el("div", { class: "row-title" }, [
-          el("span", { class: "mono", text: l.symbol }),
-          el("span", { class: "label-pill", text: l.market }),
-        ]),
-        el("div", {
-          class: "row-sub mono",
-          text: `${fmtDate(l.sellDate)} · ${fmtNum(l.quantity, 0)} 股 · 成本 ${fmtMoney(l.costBasis, l.currency)} → 收 ${fmtMoney(l.proceeds, l.currency)}`,
-        }),
-      ]),
-      el("div", { class: "row-right" }, [
-        el("div", { class: `mono ${pnlClass(l.realizedPnL)}`, text: fmtMoney(l.realizedPnL, l.currency) }),
-        el("div", {
-          class: "row-sub mono",
-          text: l.holdingDays === null ? "—" : `持有 ${l.holdingDays} 天`,
-        }),
-      ]),
-    ])
-  );
-
-  frag.appendChild(box("已實現損益（已扣手續費與稅）", rows));
+  frag.appendChild(box("已實現損益（已扣手續費與稅）", lots.map(realizedRow)));
   return frag;
 }
 
@@ -916,7 +1119,7 @@ function bucketKey(date, bucket) {
 }
 
 function viewChart() {
-  const { lots } = computeBook(state.trades);
+  const lots = allRealized();
   // 預設選資料筆數最多的幣別，否則可能一進來就落在只有一筆的幣別而畫不出線。
   const counts = {};
   for (const l of lots) counts[l.currency] = (counts[l.currency] || 0) + 1;
@@ -932,7 +1135,7 @@ function viewChart() {
   for (const l of relevant) {
     const { key, label } = bucketKey(l.sellDate, bucket);
     if (!buckets.has(key)) buckets.set(key, { key, label, sum: 0 });
-    buckets.get(key).sum += l.realizedPnL;
+    buckets.get(key).sum += l.pnl;
   }
 
   const ordered = [...buckets.values()].sort((a, b) => (a.key < b.key ? -1 : 1));
@@ -990,14 +1193,14 @@ function viewChart() {
 }
 
 function viewExposure() {
-  const { positions } = computeBook(state.trades);
+  const positions = allPositions();
   if (!positions.length) return box("持股曝險", blankslate("目前沒有持股"));
 
   // 不同幣別不能加在同一個圓餅裡（沒有匯率換算，比例會失真），一次只看一種幣別。
+  const exposureValue = (p) => p.marketValue ?? p.totalCost;
   const byCurrencyCount = {};
   for (const p of positions) {
-    const v = marketValue(p) ?? p.shares * p.avgCost;
-    byCurrencyCount[p.currency] = (byCurrencyCount[p.currency] || 0) + v;
+    byCurrencyCount[p.currency] = (byCurrencyCount[p.currency] || 0) + exposureValue(p);
   }
   const currencies = Object.keys(byCurrencyCount).sort(
     (a, b) => byCurrencyCount[b] - byCurrencyCount[a]
@@ -1010,7 +1213,7 @@ function viewExposure() {
   const mode = viewOptions.exposureMode;
   const totals = new Map();
   for (const p of positions.filter((p) => p.currency === currency)) {
-    const value = marketValue(p) ?? p.shares * p.avgCost;
+    const value = exposureValue(p);
     const name = mode === "sector" ? sectorOf(p.symbol) : p.symbol;
     totals.set(name, (totals.get(name) || 0) + value);
   }
@@ -1074,7 +1277,7 @@ function viewExposure() {
       }, [
         el("div", {
           class: "row-sub",
-          text: `以 ${currency} 計價的部位（不同幣別不換算匯率，分開檢視）。有填現價的用市值，其餘用成本。產業對照表在 web/app.js 的 SECTORS，可自行擴充。`,
+          text: `以 ${currency} 計價的部位（不同幣別不換算匯率，分開檢視）。永豐部位用券商給的市值，手動部位有填現價才用市值，其餘用成本。產業對照表在 web/app.js 的 SECTORS，可自行擴充。`,
         }),
       ]),
     ], controls)
@@ -1083,45 +1286,60 @@ function viewExposure() {
 }
 
 function viewStats() {
-  const { lots } = computeBook(state.trades);
+  const lots = allRealized();
   if (!lots.length) return box("交易統計", blankslate("尚無平倉紀錄", "統計需要至少一筆已實現損益"));
 
-  const wins = lots.filter((l) => l.realizedPnL > 0);
-  const losses = lots.filter((l) => l.realizedPnL < 0);
+  const wins = lots.filter((l) => l.pnl > 0);
+  const losses = lots.filter((l) => l.pnl < 0);
   const winRate = (wins.length / lots.length) * 100;
-  const avgWin = wins.length ? wins.reduce((s, l) => s + l.realizedPnL, 0) / wins.length : 0;
-  const avgLoss = losses.length ? Math.abs(losses.reduce((s, l) => s + l.realizedPnL, 0) / losses.length) : 0;
+  const avgWin = wins.length ? wins.reduce((s, l) => s + l.pnl, 0) / wins.length : 0;
+  const avgLoss = losses.length ? Math.abs(losses.reduce((s, l) => s + l.pnl, 0) / losses.length) : 0;
   const ratio = avgLoss ? avgWin / avgLoss : null;
+  // 只採計真的有持有天數的紀錄，算不出來的不列入分母，也不補估計值
   const withDays = lots.filter((l) => l.holdingDays !== null);
+  const missingDays = lots.length - withDays.length;
   const avgDays = withDays.length ? withDays.reduce((s, l) => s + l.holdingDays, 0) / withDays.length : null;
-  const currency = dominantCurrency(sumByCurrency(lots, (l) => l.realizedPnL));
+  const currency = dominantCurrency(sumByCurrency(lots, (l) => l.pnl));
 
   const frag = document.createDocumentFragment();
   frag.appendChild(
     el("div", { class: "stat-grid" }, [
       statTile("勝率", `${fmtNum(winRate, 1)}%`, `${wins.length} 勝 / ${losses.length} 敗`),
       statTile("盈虧比", ratio === null ? "—" : fmtNum(ratio, 2), "平均獲利 ÷ 平均虧損"),
-      statTile("平均持有天數", avgDays === null ? "—" : fmtNum(avgDays, 1), `${withDays.length} 筆可計算`),
+      statTile(
+        "平均持有天數",
+        avgDays === null ? "—" : fmtNum(avgDays, 1),
+        avgDays === null
+          ? `${lots.length} 筆都沒有持有天數`
+          : `以 ${withDays.length}/${lots.length} 筆計算${missingDays ? `，${missingDays} 筆無天數未計入` : ""}`
+      ),
       statTile("平均獲利", fmtMoney(avgWin, currency), null, "gain"),
       statTile("平均虧損", fmtMoney(-avgLoss, currency), null, "loss"),
       statTile("總平倉筆數", String(lots.length)),
     ])
   );
 
+  // 同一代號在台美股都可能出現，幣別不同不能相加，所以用 market:symbol 當 key
   const bySymbol = new Map();
   for (const l of lots) {
-    if (!bySymbol.has(l.symbol)) bySymbol.set(l.symbol, { symbol: l.symbol, currency: l.currency, pnl: 0, n: 0, w: 0 });
-    const s = bySymbol.get(l.symbol);
-    s.pnl += l.realizedPnL;
+    const key = `${l.market}:${l.symbol}`;
+    if (!bySymbol.has(key)) {
+      bySymbol.set(key, { symbol: l.symbol, market: l.market, currency: l.currency, pnl: 0, n: 0, w: 0 });
+    }
+    const s = bySymbol.get(key);
+    s.pnl += l.pnl;
     s.n++;
-    if (l.realizedPnL > 0) s.w++;
+    if (l.pnl > 0) s.w++;
   }
   const rows = [...bySymbol.values()]
     .sort((a, b) => b.pnl - a.pnl)
     .map((s) =>
       el("div", { class: "box-row" }, [
         el("div", { class: "row-main" }, [
-          el("div", { class: "row-title" }, [el("span", { class: "mono", text: s.symbol })]),
+          el("div", { class: "row-title" }, [
+            el("span", { class: "mono", text: s.symbol }),
+            el("span", { class: "label-pill", text: s.market }),
+          ]),
           el("div", { class: "row-sub", text: `${s.n} 筆 · 勝率 ${fmtNum((s.w / s.n) * 100, 0)}%` }),
         ]),
         el("div", { class: `row-right mono ${pnlClass(s.pnl)}`, text: fmtMoney(s.pnl, s.currency) }),
@@ -1133,7 +1351,8 @@ function viewStats() {
 }
 
 function viewDividends() {
-  if (!state.dividends.length)
+  const brokerTotals = brokerDividendTotals();
+  if (!state.dividends.length && !brokerTotals.length)
     return box("股利紀錄", blankslate("尚無股利紀錄", "同步腳本寫入後會顯示在這裡"));
 
   const byYear = new Map();
@@ -1145,17 +1364,54 @@ function viewDividends() {
 
   const frag = document.createDocumentFragment();
   const total = sumByCurrency(state.dividends, (d) => d.amount);
+  const brokerTotal = sumByCurrency(brokerTotals, (s) => s.amount);
   frag.appendChild(
     el("div", { class: "stat-grid" }, [
-      statTile("累計股利", fmtMultiLines(total), `${state.dividends.length} 筆`),
-    ])
+      statTile("手動紀錄股利", fmtMultiLines(total), `${state.dividends.length} 筆`),
+      brokerTotals.length
+        ? statTile("永豐累計配息", fmtMultiLines(brokerTotal), `${brokerTotals.length} 檔 · 無發放日期`)
+        : null,
+    ].filter(Boolean))
   );
+
+  if (brokerTotals.length) {
+    frag.appendChild(
+      box(
+        "永豐配息（累計金額）",
+        [
+          el("div", { class: "box-body" }, [
+            el("div", {
+              class: "row-sub",
+              text: "永豐沒有股利查詢 API，這裡是庫存與平倉紀錄裡的累計配息金額，沒有個別發放日期，也無法拆成單筆。",
+            }),
+          ]),
+          ...brokerTotals.map((s) => {
+            const parts = [];
+            if (s.holding) parts.push(`持有中 ${fmtMoney(s.holding, s.currency)}`);
+            if (s.closed) parts.push(`已平倉 ${fmtMoney(s.closed, s.currency)}`);
+            return el("div", { class: "box-row" }, [
+              el("div", { class: "row-main" }, [
+                el("div", { class: "row-title" }, [
+                  el("span", { class: "mono", text: s.symbol }),
+                  el("span", { class: "label-pill", text: s.market }),
+                  el("span", { class: "label-pill src-sinopac", text: "永豐" }),
+                ]),
+                subLine(parts),
+              ]),
+              el("div", { class: "row-right mono gain", text: fmtMoney(s.amount, s.currency, 0) }),
+            ]);
+          }),
+        ],
+        el("span", { class: "mono muted", text: fmtMulti(brokerTotal) })
+      )
+    );
+  }
 
   for (const [year, list] of [...byYear.entries()].sort((a, b) => b[0] - a[0])) {
     const yearTotal = sumByCurrency(list, (d) => d.amount);
     frag.appendChild(
       box(
-        `${year} 年`,
+        `${year} 年（有發放日期）`,
         list.map((d) =>
           el("div", { class: "box-row" }, [
             el("div", { class: "row-main" }, [
@@ -1206,32 +1462,50 @@ function csvEscape(v) {
 }
 
 function buildReportCsv(year) {
-  const { lots } = computeBook(state.trades);
+  const lots = allRealized();
   const yearLots = lots.filter((l) => l.sellDate.getFullYear() === year);
   const yearDividends = state.dividends.filter((d) => d.payDate.getFullYear() === year);
 
   const lines = [];
   lines.push(`已實現損益 ${year}`);
-  lines.push(["平倉日期", "代號", "市場", "幣別", "股數", "成本", "賣出收入", "已實現損益", "持有天數"].join(","));
+  lines.push(
+    [
+      "平倉日期",
+      "來源",
+      "代號",
+      "市場",
+      "幣別",
+      "股數",
+      "成本",
+      "賣出收入",
+      "賣出均價",
+      "已實現損益",
+      "持有天數",
+      "期間配息",
+    ].join(",")
+  );
   for (const l of yearLots) {
     lines.push(
       [
         fmtDate(l.sellDate),
+        SOURCE_LABEL[l.source] || l.source,
         l.symbol,
         l.market,
         l.currency,
-        l.quantity,
+        l.quantity ?? "",
         l.costBasis.toFixed(2),
-        l.proceeds.toFixed(2),
-        l.realizedPnL.toFixed(2),
+        l.proceeds === null ? "" : l.proceeds.toFixed(2),
+        l.sellPrice === null ? "" : l.sellPrice.toFixed(4),
+        l.pnl.toFixed(2),
         l.holdingDays ?? "",
+        l.exDividendAmt ? l.exDividendAmt.toFixed(2) : "",
       ]
         .map(csvEscape)
         .join(",")
     );
   }
 
-  const realizedTotal = sumByCurrency(yearLots, (l) => l.realizedPnL);
+  const realizedTotal = sumByCurrency(yearLots, (l) => l.pnl);
   lines.push("");
   for (const [c, v] of Object.entries(realizedTotal)) lines.push(`已實現損益合計 (${c}),${v.toFixed(2)}`);
 
@@ -1245,11 +1519,16 @@ function buildReportCsv(year) {
   lines.push("");
   for (const [c, v] of Object.entries(divTotal)) lines.push(`股利合計 (${c}),${v.toFixed(2)}`);
 
+  if (brokerDividendTotals().length) {
+    lines.push("");
+    lines.push("永豐配息只有累計金額、沒有發放日期，無法歸屬年度，未列入本表");
+  }
+
   return lines.join("\n");
 }
 
 function viewReport() {
-  const { lots } = computeBook(state.trades);
+  const lots = allRealized();
   const years = [
     ...new Set([
       ...lots.map((l) => l.sellDate.getFullYear()),
@@ -1316,7 +1595,7 @@ function viewReport() {
   });
 
   const yearLots = lots.filter((l) => l.sellDate.getFullYear() === year);
-  const realizedTotal = sumByCurrency(yearLots, (l) => l.realizedPnL);
+  const realizedTotal = sumByCurrency(yearLots, (l) => l.pnl);
   const divTotal = sumByCurrency(
     state.dividends.filter((d) => d.payDate.getFullYear() === year),
     (d) => d.amount

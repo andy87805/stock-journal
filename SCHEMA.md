@@ -57,12 +57,36 @@ collection 名稱與欄位皆固定如下，改動前先更新本檔案。
 | sellDate | string | 平倉日 `YYYY-MM-DD`（`list_profit_loss.date`） |
 | lots | number | 張數（零股為 0，同上） |
 | sellPrice | number | 每股賣出價（`price`） |
-| pnl | number | 已實現損益（已扣手續費與稅） |
-| prRatio | number | 報酬率（`pr_ratio`，原樣存，單位以券商為準） |
-| entryCost | number | 進場總成本 = `list_profit_loss_detail[].cost` 之和 |
+| pnl | number | 已實現損益。**已扣手續費與稅，而且已經含配息**，見下方說明 |
+| prRatio | number | 報酬率（`pr_ratio`）。原樣存。單位不明（可能是 % 也可能是小數），未經驗證前不要拿來運算或顯示 |
+| entryCost | number | 進場總成本 = `list_profit_loss_detail[].cost` 之和。未與正式環境的 `entry_cost` 逐筆比對過，可能是未扣配息的毛額 |
 | fee | number | `list_profit_loss_detail[].fee` 之和 |
 | tax | number | `list_profit_loss_detail[].tax` 之和 |
-| exDividendAmt | number | 持有期間配息 = `list_profit_loss_detail[].ex_dividend_amt` 之和 |
+| exDividendAmt | number | 持有期間配息 = `list_profit_loss_detail[].ex_dividend_amt` 之和。**只作獨立顯示，絕對不要加進 `pnl`** |
+
+### `pnl` 已含配息（重要，別重複計算）
+
+拿 `list_profit_loss_summary` 的實測數字驗證過，公式是：
+
+```
+buy_cost  = entry_cost + 買進手續費 − 期間配息
+sell_cost = cover_cost − 賣出手續費 − 交易稅
+pnl       = sell_cost − buy_cost
+```
+
+實測對照（五檔全部完全吻合）：
+
+| 代號 | entry_cost | buy_cost | sell_cost | sell−buy | pnl |
+|---|---|---|---|---|---|
+| 0050 | 39300 | 37939 | 88436 | 50497 | 50497 |
+| 0056 | 230197 | 142305 | 274452 | 132147 | 132147 |
+| 00891 | 40050 | 24204 | 91249 | 67045 | 67045 |
+| 2330 | 34450 | 32499 | 109863 | 77364 | 77364 |
+| 00893 | 46060 | 46082 | 118174 | 72092 | 72092 |
+
+0056 的 `buy_cost` 比 `entry_cost` 低 8.8 萬，就是配息抵減成本的結果；00893 沒配息，`buy_cost` 反而比 `entry_cost` 高 22 元（買進手續費）。
+
+所以配息**已經反映在 `pnl` 裡**。前端把 `exDividendAmt` 當補充資訊單獨顯示，不加總、不列入年度股利。
 | entryDate | string? | 加權平均進場日 `YYYY-MM-DD`，用 `cost` 對 `list_profit_loss_detail[].date` 加權 |
 | holdingDays | number? | `sellDate - entryDate`。算不出 entryDate 時兩者都留空，**不要填假值** |
 | dseq | string | 券商交易序號 |
