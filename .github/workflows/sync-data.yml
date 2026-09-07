@@ -39,8 +39,11 @@ jobs:
         continue-on-error: true
         run: python sync/shioaji_sync.py
 
+      # Schwab 暫緩中（開發者平台 2FA 只收美國門號），沒設 secret 就整步跳過，
+      # 否則每次執行都會固定失敗，久了就會習慣性忽略失敗通知
       - name: Sync Schwab (美股)
         id: schwab
+        if: env.SCHWAB_CLIENT_ID != ''
         continue-on-error: true
         run: python sync/schwab_sync.py
 
