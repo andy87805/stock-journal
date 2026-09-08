@@ -24,6 +24,7 @@ const db = initializeFirestore(app, { localCache: persistentLocalCache() });
 const state = {
   positions: [],
   realized: [],
+  lots: [],
   trades: [],
   dividends: [],
   events: [],
@@ -72,6 +73,86 @@ const SECTORS = {
 };
 
 const DAY_MS = 86400000;
+
+/* ---------- 代號圖示 ---------- */
+
+// 沒有免費可靠的台股 logo 來源；向第三方抓圖等於把持股清單洩漏給那個服務，
+// 而且離線就顯示不出來（本站是可離線使用的 PWA），所以圖示一律在本機依代號生成。
+const US_ETFS = new Set(["VOO", "SPY", "QQQ", "VTI"]);
+
+// 台股 ETF 代號都以 00 開頭（0050、00878、006208…），SECTORS 沒收錄的代號也適用
+const isEtf = (symbol, market) =>
+  market === "TW" ? /^00/.test(symbol) : US_ETFS.has(symbol) || SECTORS[symbol] === "ETF";
+
+// FNV-1a 加尾段混洗：像 2330 / 2331 這種只差一個字元的代號才不會拿到相鄰色相
+const symbolHash = (s) => {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  h ^= h >>> 15;
+  h = Math.imul(h, 2246822507);
+  return (h ^ (h >>> 13)) >>> 0;
+};
+
+// 紅與綠在這個 App 是漲跌的語意色，底色刻意避開，免得被讀成損益
+const ICON_HUES = [206, 224, 242, 260, 278, 296, 316, 334, 24, 38, 188, 172];
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function symbolIcon(symbol, market = "TW") {
+  const sym = String(symbol || "");
+  const h = symbolHash(`${market}:${sym}`);
+  const hue = ICON_HUES[h % ICON_HUES.length];
+  const lightness = 34 + ((h >>> 8) % 3) * 6;
+  const etf = isEtf(sym, market);
+
+  const ns = (tag, attrs = {}) => {
+    const n = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    return n;
+  };
+
+  const svg = ns("svg", {
+    viewBox: "0 0 32 32",
+    class: "sym-icon",
+    role: "img",
+    "aria-label": etf ? `${sym} ETF` : sym,
+  });
+  svg.appendChild(
+    ns("rect", {
+      x: 0.5,
+      y: 0.5,
+      width: 31,
+      height: 31,
+      rx: 8,
+      class: "plate",
+      fill: `hsl(${hue}, 56%, ${lightness}%)`,
+    })
+  );
+
+  if (etf) {
+    // 疊層圖示：一眼看出是一籃子成分股而不是單一公司
+    svg.appendChild(ns("path", { d: "M16 6 L26 11 L16 16 L6 11 Z", class: "glyph" }));
+    svg.appendChild(ns("path", { d: "M6.5 15.6 L16 20.3 L25.5 15.6", class: "glyph-line", opacity: "0.8" }));
+    svg.appendChild(ns("path", { d: "M6.5 19.9 L16 24.6 L25.5 19.9", class: "glyph-line", opacity: "0.55" }));
+    return svg;
+  }
+
+  // 台股 4 位數字、美股字母，字級隨長度縮放才能在 28px 下都看得清楚
+  const label = sym.slice(0, 4).toUpperCase() || "?";
+  const size = label.length <= 2 ? 15 : label.length === 3 ? 13 : 10.5;
+  const text = ns("text", {
+    x: 16,
+    y: 16 + size * 0.35,
+    "text-anchor": "middle",
+    "font-size": size,
+  });
+  text.textContent = label;
+  svg.appendChild(text);
+  return svg;
+}
 
 /* ---------- utils ---------- */
 
@@ -332,6 +413,81 @@ function brokerDividendTotals() {
   return [...bySymbol.values()].sort((a, b) => b.amount - a.amount);
 }
 
+// 交易紀錄頁的時間軸：買進來自 lots、永豐的賣出來自 realized、手動輸入的買賣來自 trades。
+// realized 只有永豐的紀錄，手動賣出從 trades 進來，兩邊不會重複計入。
+function allTransactions() {
+  const out = [];
+
+  for (const l of state.lots) {
+    out.push({
+      key: `lot:${l.id}`,
+      side: "buy",
+      source: "sinopac",
+      symbol: l.symbol,
+      market: l.market,
+      currency: l.currency,
+      date: l.tradeDate,
+      amount: l.cost,
+      lots: l.lots,
+      unitPrice: l.unitPrice,
+      fee: l.fee,
+      status: l.status,
+      pnl: null,
+      shares: null,
+      costBasis: null,
+      holdingDays: null,
+      trade: null,
+    });
+  }
+
+  for (const r of state.realized) {
+    out.push({
+      key: `realized:${r.id}`,
+      side: "sell",
+      source: "sinopac",
+      symbol: r.symbol,
+      market: r.market,
+      currency: r.currency,
+      date: r.sellDate,
+      amount: null,
+      lots: r.lots,
+      unitPrice: r.sellPrice,
+      fee: r.fee + r.tax,
+      status: null,
+      pnl: r.pnl,
+      shares: null,
+      costBasis: r.entryCost,
+      holdingDays: r.holdingDays,
+      trade: null,
+    });
+  }
+
+  for (const t of state.trades) {
+    out.push({
+      key: `trade:${t.id}`,
+      side: t.side,
+      source: "manual",
+      symbol: t.symbol,
+      market: t.market,
+      currency: t.currency,
+      date: t.tradeDate,
+      amount: t.quantity * t.price,
+      lots: 0,
+      unitPrice: t.price,
+      fee: t.fee + t.tax,
+      status: null,
+      pnl: null,
+      shares: t.quantity,
+      costBasis: null,
+      holdingDays: null,
+      trade: t,
+    });
+  }
+
+  out.sort((a, b) => b.date - a.date || a.symbol.localeCompare(b.symbol));
+  return out;
+}
+
 /* ---------- firestore ---------- */
 
 function normalizeTrade(id, d) {
@@ -378,6 +534,7 @@ function normalizeRealized(id, d) {
     market: d.market || "TW",
     currency: d.currency || "TWD",
     sellDate: parseDate(d.sellDate) || new Date(0),
+    lots: Number(d.lots) || 0,
     sellPrice: Number(d.sellPrice) || 0,
     pnl: Number(d.pnl) || 0,
     entryCost: Number(d.entryCost) || 0,
@@ -393,6 +550,28 @@ function normalizeRealized(id, d) {
   };
 }
 
+function normalizeLot(id, d) {
+  return {
+    id,
+    broker: d.broker || "sinopac",
+    symbol: String(d.symbol ?? ""),
+    market: d.market || "TW",
+    currency: d.currency || "TWD",
+    status: d.status === "closed" ? "closed" : "open",
+    tradeDate: parseDate(d.tradeDate) || new Date(0),
+    lots: Number(d.lots) || 0,
+    cost: Number(d.cost) || 0,
+    // open 的庫存明細沒給單價，缺就是缺，不用 cost 回推
+    unitPrice:
+      d.unitPrice === null || d.unitPrice === undefined || d.unitPrice === ""
+        ? null
+        : Number(d.unitPrice),
+    fee: Number(d.fee) || 0,
+    exDividends: Number(d.exDividends) || 0,
+    dseq: d.dseq || "",
+  };
+}
+
 function subscribe() {
   onSnapshot(collection(db, "positions"), (snap) => {
     state.positions = snap.docs.map((d) => normalizePosition(d.id, d.data()));
@@ -402,6 +581,12 @@ function subscribe() {
   onSnapshot(collection(db, "realized"), (snap) => {
     state.realized = snap.docs.map((d) => normalizeRealized(d.id, d.data()));
     state.realized.sort((a, b) => b.sellDate - a.sellDate);
+    render();
+  });
+
+  onSnapshot(collection(db, "lots"), (snap) => {
+    state.lots = snap.docs.map((d) => normalizeLot(d.id, d.data()));
+    state.lots.sort((a, b) => b.tradeDate - a.tradeDate);
     render();
   });
 
@@ -714,6 +899,9 @@ const viewOptions = {
   exposureMode: "symbol",
   exposureCurrency: null,
   reportYear: null,
+  ledgerYear: "all",
+  ledgerMonth: "all",
+  ledgerPage: 1,
 };
 
 function viewDashboard() {
@@ -809,7 +997,7 @@ function viewDashboard() {
       box(
         "最近手動交易",
         recentManual.map(tradeRow),
-        el("a", { href: "#/trades", text: "全部", class: "mono" })
+        el("a", { href: "#/ledger", text: "全部", class: "mono" })
       )
     );
   }
@@ -832,6 +1020,7 @@ const brokerLabel = { sinopac: "永豐", schwab: "嘉信", manual: "手動" };
 function tradeRow(t) {
   const amount = t.quantity * t.price;
   return el("div", { class: "box-row" }, [
+    symbolIcon(t.symbol, t.market),
     el("div", { class: "row-main" }, [
       el("div", { class: "row-title" }, [
         el("span", { class: "mono", text: t.symbol }),
@@ -853,6 +1042,7 @@ function tradeRow(t) {
 function eventRow(e) {
   const days = Math.ceil((e.eventDate.getTime() - Date.now()) / DAY_MS);
   return el("div", { class: "box-row" }, [
+    symbolIcon(e.symbol, e.market),
     el("div", { class: "row-main" }, [
       el("div", { class: "row-title" }, [
         el("span", { class: "mono", text: e.symbol }),
@@ -907,27 +1097,32 @@ function positionRow(p) {
         })
       : el("div", { class: "price-static mono", text: `現價 ${fmtNum(p.lastPrice)}` });
 
+  // 現價與損益放在標題那一行的右側，明細行才能用滿整個寬度。
+  // 之前現價是獨立的右欄，會把明細擠成每個詞一行、還出現落單的分隔點。
   return el("div", { class: "box-row" }, [
+    symbolIcon(p.symbol, p.market),
     el("div", { class: "row-main" }, [
-      el("div", { class: "row-title" }, [
-        el("span", { class: "mono", text: p.symbol }),
-        el("span", { class: "label-pill", text: p.market }),
-        el("span", { class: `label-pill src-${p.source}`, text: SOURCE_LABEL[p.source] }),
-        p.cond && p.cond !== "Cash"
-          ? el("span", { class: "label-pill", text: COND_LABEL[p.cond] || p.cond })
-          : null,
+      el("div", { class: "row-head" }, [
+        el("div", { class: "row-title" }, [
+          el("span", { class: "mono", text: p.symbol }),
+          el("span", { class: "label-pill", text: p.market }),
+          el("span", { class: `label-pill src-${p.source}`, text: SOURCE_LABEL[p.source] }),
+          p.cond && p.cond !== "Cash"
+            ? el("span", { class: "label-pill", text: COND_LABEL[p.cond] || p.cond })
+            : null,
+        ]),
+        el("div", { class: "row-head-right" }, [
+          priceNode,
+          el("div", {
+            class: `mono ${u === null ? "muted" : pnlClass(u)}`,
+            text:
+              u === null
+                ? "—"
+                : `${fmtMoney(u, p.currency)}${pct === null ? "" : ` (${pct > 0 ? "+" : ""}${fmtNum(pct, 1)}%)`}`,
+          }),
+        ]),
       ]),
       ...subs,
-    ]),
-    el("div", { class: "row-right" }, [
-      priceNode,
-      el("div", {
-        class: `mono ${u === null ? "muted" : pnlClass(u)}`,
-        text:
-          u === null
-            ? "—"
-            : `${fmtMoney(u, p.currency)}${pct === null ? "" : ` (${pct > 0 ? "+" : ""}${fmtNum(pct, 1)}%)`}`,
-      }),
     ]),
   ]);
 }
@@ -943,7 +1138,7 @@ function viewPositions() {
     frag.appendChild(
       el("div", {
         class: "flash",
-        text: `${missing.length} 檔手動部位缺現價，未實現損益算不出來：在右側欄位填入即可，會存進 Firestore 跨裝置共用。永豐部位的現價由同步腳本寫入。`,
+        text: `${missing.length} 檔手動部位缺現價，填入右側欄位才算得出未實現損益（台股由同步自動寫入）。`,
       })
     );
   }
@@ -951,8 +1146,134 @@ function viewPositions() {
   return frag;
 }
 
-function viewTrades() {
-  const frag = document.createDocumentFragment();
+const LEDGER_PAGE_SIZE = 10;
+const LOT_STATUS_LABEL = { open: "持有中", closed: "已平倉" };
+
+function ledgerRow(tx) {
+  // 狀態、來源這類次要資訊放進 row-sub，標題只留三顆 pill，375px 下才不會折成兩行
+  const parts = [fmtDate(tx.date)];
+  if (tx.status) parts.push(LOT_STATUS_LABEL[tx.status]);
+  // lots 是張數，零股一律回報 0，不能顯示成「0 張」讓人以為沒成交；數量以金額為準
+  if (tx.lots > 0) parts.push(`${fmtNum(tx.lots, 0)} 張`);
+  else if (tx.source === "sinopac") parts.push("零股");
+  if (tx.shares !== null) parts.push(`${fmtNum(tx.shares, 0)} 股`);
+  if (tx.unitPrice) parts.push(`@ ${fmtNum(tx.unitPrice)}`);
+  if (tx.costBasis !== null) parts.push(`成本 ${fmtMoney(tx.costBasis, tx.currency)}`);
+  if (tx.fee) parts.push(`費 ${fmtNum(tx.fee, 0)}`);
+  if (tx.holdingDays !== null) parts.push(`持有 ${tx.holdingDays} 天`);
+
+  const right =
+    tx.pnl === null
+      ? [
+          el("div", { class: "mono", text: fmtMoney(tx.amount, tx.currency) }),
+          el("div", { class: "row-sub mono", text: tx.side === "buy" ? "成本" : "賣出金額" }),
+        ]
+      : [
+          el("div", { class: `mono ${pnlClass(tx.pnl)}`, text: fmtMoney(tx.pnl, tx.currency) }),
+          el("div", { class: "row-sub mono", text: "已實現" }),
+        ];
+
+  const row = el("div", { class: "box-row" }, [
+    symbolIcon(tx.symbol, tx.market),
+    el("div", { class: "row-main" }, [
+      el("div", { class: "row-title" }, [
+        el("span", { class: "mono", text: tx.symbol }),
+        el("span", { class: "label-pill", text: tx.market }),
+        el("span", { class: `label-pill ${tx.side}`, text: tx.side === "buy" ? "買" : "賣" }),
+        el("span", { class: `label-pill src-${tx.source}`, text: SOURCE_LABEL[tx.source] }),
+      ]),
+      subLine(parts),
+    ]),
+    el("div", { class: "row-right" }, right),
+  ]);
+
+  if (tx.trade) {
+    row.style.cursor = "pointer";
+    row.addEventListener("click", () => openTradeDetail(tx.trade));
+  }
+  return row;
+}
+
+function viewLedger() {
+  const all = allTransactions();
+  const years = [...new Set(all.map((t) => t.date.getFullYear()))].sort((a, b) => b - a);
+  if (viewOptions.ledgerYear !== "all" && !years.includes(viewOptions.ledgerYear)) {
+    viewOptions.ledgerYear = "all";
+  }
+  const year = viewOptions.ledgerYear;
+  const month = viewOptions.ledgerMonth;
+
+  const filtered = all.filter(
+    (t) =>
+      (year === "all" || t.date.getFullYear() === year) &&
+      (month === "all" || t.date.getMonth() + 1 === month)
+  );
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / LEDGER_PAGE_SIZE));
+  if (viewOptions.ledgerPage > pageCount) viewOptions.ledgerPage = pageCount;
+  const page = viewOptions.ledgerPage;
+  const shown = filtered.slice((page - 1) * LEDGER_PAGE_SIZE, page * LEDGER_PAGE_SIZE);
+
+  const goPage = (n) => {
+    viewOptions.ledgerPage = Math.min(pageCount, Math.max(1, n));
+    render();
+  };
+
+  const pickYear = (ev) => {
+    viewOptions.ledgerYear = ev.target.value === "all" ? "all" : Number(ev.target.value);
+    viewOptions.ledgerPage = 1;
+    render();
+  };
+
+  const pickMonth = (ev) => {
+    viewOptions.ledgerMonth = ev.target.value === "all" ? "all" : Number(ev.target.value);
+    viewOptions.ledgerPage = 1;
+    render();
+  };
+
+  const yearSelect = el("select", { onchange: pickYear }, [
+    el("option", { value: "all", text: "全部年度", ...(year === "all" ? { selected: "" } : {}) }),
+    ...years.map((y) =>
+      el("option", { value: String(y), text: `${y} 年`, ...(y === year ? { selected: "" } : {}) })
+    ),
+  ]);
+
+  const monthSelect = el("select", { onchange: pickMonth }, [
+    el("option", { value: "all", text: "全部月份", ...(month === "all" ? { selected: "" } : {}) }),
+    ...Array.from({ length: 12 }, (_, i) => i + 1).map((m) =>
+      el("option", { value: String(m), text: `${m} 月`, ...(m === month ? { selected: "" } : {}) })
+    ),
+  ]);
+
+  const filters = el("div", { class: "box-body" }, [
+    el("div", { class: "field-row" }, [
+      el("div", { class: "field slim" }, [el("label", { text: "年度" }), yearSelect]),
+      el("div", { class: "field slim" }, [el("label", { text: "月份" }), monthSelect]),
+    ]),
+    el("div", {
+      class: "row-sub",
+      text: "永豐的買進來自逐筆進場批次、賣出來自平倉紀錄；手動輸入的交易點一下可編輯備註或刪除。",
+    }),
+  ]);
+
+  const pager = el("div", { class: "pager" }, [
+    el("button", {
+      class: "btn btn-sm",
+      text: "← 上一頁",
+      ...(page <= 1 ? { disabled: "" } : {}),
+      onclick: () => goPage(page - 1),
+    }),
+    el("span", {
+      class: "mono muted",
+      text: `第 ${page} / ${pageCount} 頁 · 共 ${filtered.length} 筆`,
+    }),
+    el("button", {
+      class: "btn btn-sm",
+      text: "下一頁 →",
+      ...(page >= pageCount ? { disabled: "" } : {}),
+      onclick: () => goPage(page + 1),
+    }),
+  ]);
 
   const addBtn = el("button", {
     class: "btn btn-sm btn-primary",
@@ -962,17 +1283,22 @@ function viewTrades() {
 
   const form = el("div", { class: "box-body hidden", id: "tradeForm" }, [buildTradeForm()]);
 
-  const list = state.trades.length
-    ? state.trades.map(tradeRowInteractive)
+  const body = shown.length
+    ? shown.map(ledgerRow)
     : [
-        blankslate(
-          "這裡只放手動輸入的交易",
-          "永豐沒有提供逐筆成交的 API，台股資料請看「持股」與「已實現」兩頁。這一頁用來記錄同步抓不到的交易，例如美股。"
-        ),
+        all.length
+          ? blankslate("這個期間沒有交易紀錄", "換一個年度或月份試試")
+          : blankslate("尚無交易紀錄", "永豐同步的買進批次與平倉紀錄，加上手動輸入的交易都會列在這裡"),
       ];
 
-  const b = box("手動交易", [form, ...list], addBtn);
-  frag.appendChild(b);
+  const frag = document.createDocumentFragment();
+  frag.appendChild(
+    box(
+      "交易紀錄",
+      [filters, form, ...body, ...(filtered.length ? [el("div", { class: "box-body" }, [pager])] : [])],
+      addBtn
+    )
+  );
   return frag;
 }
 
@@ -1048,13 +1374,6 @@ function buildTradeForm() {
   return form;
 }
 
-function tradeRowInteractive(t) {
-  const row = tradeRow(t);
-  row.style.cursor = "pointer";
-  row.addEventListener("click", () => openTradeDetail(t));
-  return row;
-}
-
 function openTradeDetail(t) {
   const view = document.getElementById("view");
   const noteInput = el("textarea", { rows: "3", text: t.note, placeholder: "進出場理由、心得" });
@@ -1066,11 +1385,11 @@ function openTradeDetail(t) {
       saveBtn.disabled = true;
       await saveTradeNote(t.id, noteInput.value.trim());
       saveBtn.disabled = false;
-      location.hash = "#/trades";
+      location.hash = "#/ledger";
     },
   });
 
-  const actions = [saveBtn, el("a", { class: "btn", href: "#/trades", text: "返回" })];
+  const actions = [saveBtn, el("a", { class: "btn", href: "#/ledger", text: "返回" })];
 
   if (t.broker === "manual") {
     actions.push(
@@ -1080,7 +1399,7 @@ function openTradeDetail(t) {
         onclick: async () => {
           if (!confirm("刪除這筆手動紀錄？")) return;
           await deleteTrade(t.id);
-          location.hash = "#/trades";
+          location.hash = "#/ledger";
         },
       })
     );
@@ -1114,6 +1433,7 @@ function realizedRow(l) {
   if (l.exDividendAmt) parts.push(`配息 ${fmtMoney(l.exDividendAmt, l.currency)}`);
 
   return el("div", { class: "box-row" }, [
+    symbolIcon(l.symbol, l.market),
     el("div", { class: "row-main" }, [
       el("div", { class: "row-title" }, [
         el("span", { class: "mono", text: l.symbol }),
@@ -1380,6 +1700,7 @@ function viewStats() {
     .sort((a, b) => b.pnl - a.pnl)
     .map((s) =>
       el("div", { class: "box-row" }, [
+        symbolIcon(s.symbol, s.market),
         el("div", { class: "row-main" }, [
           el("div", { class: "row-title" }, [
             el("span", { class: "mono", text: s.symbol }),
@@ -1435,6 +1756,7 @@ function viewDividends() {
             if (s.holding) parts.push(`持有中 ${fmtMoney(s.holding, s.currency)}`);
             if (s.closed) parts.push(`已平倉 ${fmtMoney(s.closed, s.currency)}`);
             return el("div", { class: "box-row" }, [
+              symbolIcon(s.symbol, s.market),
               el("div", { class: "row-main" }, [
                 el("div", { class: "row-title" }, [
                   el("span", { class: "mono", text: s.symbol }),
@@ -1459,6 +1781,7 @@ function viewDividends() {
         `${year} 年（有發放日期）`,
         list.map((d) =>
           el("div", { class: "box-row" }, [
+            symbolIcon(d.symbol, d.market),
             el("div", { class: "row-main" }, [
               el("div", { class: "row-title" }, [
                 el("span", { class: "mono", text: d.symbol }),
@@ -1679,7 +2002,7 @@ function viewReport() {
 const ROUTES = {
   "/": viewDashboard,
   "/positions": viewPositions,
-  "/trades": viewTrades,
+  "/ledger": viewLedger,
   "/realized": viewRealized,
   "/chart": viewChart,
   "/exposure": viewExposure,
@@ -1689,9 +2012,13 @@ const ROUTES = {
   "/report": viewReport,
 };
 
+// 手動交易頁已併進交易紀錄，舊的 #/trades 連結與書籤繼續有效
+const ROUTE_ALIASES = { "/trades": "/ledger" };
+
 function currentRoute() {
   const hash = location.hash.replace(/^#/, "") || "/";
-  return ROUTES[hash] ? hash : "/";
+  const route = ROUTE_ALIASES[hash] || hash;
+  return ROUTES[route] ? route : "/";
 }
 
 function render() {

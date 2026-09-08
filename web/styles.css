@@ -245,6 +245,24 @@ main {
   flex-shrink: 0;
 }
 
+/* 標題與右側數值同一行，下面的明細行就能用滿整個寬度不被擠壓 */
+.row-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.row-head .row-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.row-head-right {
+  text-align: right;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .nw {
   white-space: nowrap;
 }
@@ -289,6 +307,42 @@ main {
   color: var(--fg-subtle);
   font-size: 11px;
   margin-top: 2px;
+}
+
+/* 代號圖示（本機生成，沒有外部 logo 來源） */
+
+.sym-icon {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 1px;
+  display: block;
+}
+
+.sym-icon .plate {
+  stroke: color-mix(in srgb, var(--fg) 14%, transparent);
+  stroke-width: 1;
+}
+
+/* 底色固定是中明度彩色，白字白圖在淺色與深色主題下都一樣清楚 */
+.sym-icon .glyph {
+  fill: #ffffff;
+}
+
+.sym-icon .glyph-line {
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sym-icon text {
+  fill: #ffffff;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
 }
 
 /* pills / labels */
@@ -458,6 +512,30 @@ textarea:focus {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+/* 交易紀錄的篩選器擠在一列，欄位間距收掉 */
+.field.slim {
+  margin-bottom: 0;
+}
+
+/* 分頁 */
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pager span {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pager .btn[disabled] {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .price-input {
