@@ -96,7 +96,7 @@ def build_positions(api, account):
         ex_dividends = 0.0
         entry_dates = []
         try:
-            for det in api.list_position_detail(account, getattr(pos, "id", 0)):
+            for lot_index, det in enumerate(api.list_position_detail(account, getattr(pos, "id", 0))):
                 # 明細的 price 是「該批總成本」，不是單價
                 lot_cost = _f(getattr(det, "price", 0))
                 lot_dividends = _f(getattr(det, "ex_dividends", 0))
@@ -118,6 +118,7 @@ def build_positions(api, account):
                             "fee": _f(getattr(det, "fee", 0)),
                             "exDividends": round(lot_dividends, 2),
                             "dseq": str(getattr(det, "dseq", "") or ""),
+                            "seq": lot_index,
                         }
                     )
         except Exception as exc:

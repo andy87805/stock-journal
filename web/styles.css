@@ -320,6 +320,14 @@ main {
   display: block;
 }
 
+/* 真實標誌：不裁切、置中，比例不是正方形也不會變形 */
+.sym-icon.sym-logo {
+  object-fit: contain;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  padding: 2px;
+}
+
 .sym-icon .plate {
   stroke: color-mix(in srgb, var(--fg) 14%, transparent);
   stroke-width: 1;
@@ -720,4 +728,31 @@ svg.chart {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin: 20px 0 8px;
+}
+
+/* 市場鏡片：固定放在每頁內容的第一列，不做成 tabnav 下方的常駐橫條 */
+
+.lens {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+/* 換算說明：金額因為匯率變動而改變時，要能從畫面上解釋得出來 */
+
+.fx-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  margin: -8px 0 16px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.fx-note .rate {
+  color: var(--fg);
+  font-weight: 600;
 }

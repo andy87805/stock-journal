@@ -52,6 +52,12 @@ jobs:
         continue-on-error: true
         run: python sync/calendar_sync.py
 
+      # 總覽要把美股換算成台幣加總，匯率在這裡抓（前端直連有 CORS 與離線問題）
+      - name: Sync FX (匯率)
+        id: fx
+        continue-on-error: true
+        run: python sync/fx_sync.py
+
       # 這個 workflow 一天跑兩次（台股收盤 + 美股收盤），提醒信只在台股那一輪寄，避免一天兩封
       - name: Send calendar reminders (除權息/財報提醒信)
         id: reminders
@@ -68,6 +74,7 @@ jobs:
           if [ "${{ steps.shioaji.outcome }}" = "failure" ] || \
              [ "${{ steps.schwab.outcome }}" = "failure" ] || \
              [ "${{ steps.calendar.outcome }}" = "failure" ] || \
+             [ "${{ steps.fx.outcome }}" = "failure" ] || \
              [ "${{ steps.reminders.outcome }}" = "failure" ]; then
             echo "至少一支同步腳本失敗，詳見上方對應步驟的 log"
             exit 1

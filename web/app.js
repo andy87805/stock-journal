@@ -29,6 +29,7 @@ const state = {
   dividends: [],
   events: [],
   quotes: {},
+  fx: {},
   syncMeta: [],
   ready: false,
 };
@@ -101,7 +102,27 @@ const ICON_HUES = [206, 224, 242, 260, 278, 296, 316, 334, 24, 38, 188, 172];
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
+// 有真實標誌檔的代號列在這裡，檔案放 web/logos/{代號}.svg 或 .png。
+// 要新增就把方形圖檔丟進那個目錄、代號加進這個表，不用改其他程式。
+// 沒列在這裡的一律用下面產生的圖示——台灣的投信與多數上市公司只有橫式文字商標，
+// 硬塞進 28px 方格會變成看不清的色塊，用產生的圖示反而好認。
+const SYMBOL_LOGOS = {
+  "TW:2882": "logos/2882.svg",
+};
+
 function symbolIcon(symbol, market = "TW") {
+  const sym = String(symbol || "");
+  const logo = SYMBOL_LOGOS[`${market}:${sym}`];
+  if (logo) {
+    // 檔案掛掉就換回產生的圖示，不要留一個破圖
+    const img = el("img", { class: "sym-icon sym-logo", src: logo, alt: sym, loading: "lazy" });
+    img.addEventListener("error", () => img.replaceWith(generatedIcon(sym, market)));
+    return img;
+  }
+  return generatedIcon(sym, market);
+}
+
+function generatedIcon(symbol, market = "TW") {
   const sym = String(symbol || "");
   const h = symbolHash(`${market}:${sym}`);
   const hue = ICON_HUES[h % ICON_HUES.length];
@@ -197,13 +218,14 @@ const fmtNum = (n, digits = 2) =>
     ? "—"
     : n.toLocaleString("zh-TW", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 
-// 不同幣別不做匯率換算（沒有免費可靠的匯率來源），各自獨立顯示。
-const fmtMultiLines = (byCurrency, digits = 0) => {
+// 沒有匯率可用時的退路：各幣別各自一行，不併成一個數字。
+// 全部金額都是 0（或整包是空的）時沒有幣別可推，由呼叫端指定要用哪一種幣別顯示這個 0。
+const fmtMultiLines = (byCurrency, digits = 0, zeroCurrency = "TWD") => {
   const parts = Object.entries(byCurrency)
     .filter(([, v]) => Math.abs(v) > 0.0001)
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
     .map(([c, v]) => fmtMoney(v, c, digits));
-  return parts.length ? parts : [fmtMoney(0, "TWD")];
+  return parts.length ? parts : [fmtMoney(0, zeroCurrency)];
 };
 
 const fmtMulti = (byCurrency, digits = 0) => fmtMultiLines(byCurrency, digits).join(" · ");
@@ -223,6 +245,33 @@ const dominantCurrency = (obj) => {
   const keys = Object.keys(obj);
   if (!keys.length) return "TWD";
   return keys.sort((a, b) => Math.abs(obj[b]) - Math.abs(obj[a]))[0];
+};
+
+/* ---------- 匯率換算 ---------- */
+
+// 匯率只讀 fx/USDTWD（同步腳本每日寫入）。讀不到就回 null，呼叫端必須退回分幣別顯示：
+// 自己補一個「差不多」的匯率會做出看起來正常、實際是假的總額，比不換算更難發現錯誤。
+const usdTwdRate = () => {
+  const d = state.fx.USDTWD;
+  return d && d.rate > 0 ? d.rate : null;
+};
+
+const toTwd = (amount, currency) => {
+  if (amount === null || amount === undefined) return null;
+  if (currency === "TWD") return amount;
+  const rate = usdTwdRate();
+  return currency === "USD" && rate ? amount * rate : null;
+};
+
+// 只要有一種幣別換不了就整包回 null，不做部分加總（少算一種幣別的總額比分開顯示更誤導）。
+const sumTwd = (byCurrency) => {
+  let total = 0;
+  for (const [c, v] of Object.entries(byCurrency)) {
+    const t = toTwd(v, c);
+    if (t === null) return null;
+    total += t;
+  }
+  return total;
 };
 
 const sectorOf = (symbol) => SECTORS[symbol] || "未分類";
@@ -572,6 +621,17 @@ function normalizeLot(id, d) {
   };
 }
 
+function normalizeFx(id, d) {
+  return {
+    id,
+    base: d.base || "",
+    quote: d.quote || "",
+    rate: Number(d.rate) || 0,
+    source: d.source || "",
+    updatedAt: parseDate(d.updatedAt),
+  };
+}
+
 function subscribe() {
   onSnapshot(collection(db, "positions"), (snap) => {
     state.positions = snap.docs.map((d) => normalizePosition(d.id, d.data()));
@@ -637,6 +697,13 @@ function subscribe() {
       q[d.id] = { price: Number(v.price) || 0, updatedAt: parseDate(v.updatedAt) };
     }
     state.quotes = q;
+    render();
+  });
+
+  onSnapshot(collection(db, "fx"), (snap) => {
+    const fx = {};
+    for (const d of snap.docs) fx[d.id] = normalizeFx(d.id, d.data());
+    state.fx = fx;
     render();
   });
 
@@ -891,9 +958,65 @@ const segmented = (options, current, onChange) => {
   return wrap;
 };
 
+/* ---------- 市場鏡片 ---------- */
+
+const MARKET_LABEL = { all: "全部", TW: "台股", US: "美股" };
+
+const inMarket = (x) => viewOptions.market === "all" || x.market === viewOptions.market;
+
+// 每一頁的內容第一列都是這個控制項，位置固定才會像全站共用的鏡片而不是某頁的篩選器。
+// 不做成 tabnav 下方的常駐橫條：分頁列在 375px 已經要橫向滑，再多一條會壓縮到內容，
+// 而提醒與報表兩頁本來就不該被市場篩選，常駐橫條在那裡只會是誤導。
+const marketBar = () =>
+  el("div", { class: "lens" }, [
+    segmented(
+      [
+        ["TW", "台股"],
+        ["US", "美股"],
+        ["all", "全部"],
+      ],
+      viewOptions.market,
+      (v) => {
+        viewOptions.market = v;
+        viewOptions.ledgerPage = 1;
+        render();
+      }
+    ),
+  ]);
+
+const marketHint = () =>
+  viewOptions.market === "all"
+    ? null
+    : `目前只看${MARKET_LABEL[viewOptions.market]}，切換上方的市場可以看其他部位`;
+
+const filteredBlank = (title, sub) => blankslate(title, marketHint() || sub);
+
+/* ---------- 匯率說明 ---------- */
+
+// 換算後的數字會隨匯率變動，不能悄悄折進總額裡：用到哪個匯率、什麼時候更新的都要看得到。
+const fxAppliedNote = () => {
+  const d = state.fx.USDTWD;
+  const meta = [d.updatedAt ? `${fmtDate(d.updatedAt)} 更新` : null, d.source].filter(Boolean).join(" · ");
+  return el("div", { class: "fx-note" }, [
+    el("span", { text: "美股已換算併入台幣：" }),
+    el("span", { class: "rate mono nw", text: `1 USD = ${fmtMoney(d.rate, "TWD", 3)}` }),
+    meta ? el("span", { class: "nw", text: `（${meta}）` }) : null,
+  ]);
+};
+
+const fxMissingNote = () =>
+  el("div", {
+    class: "flash",
+    text:
+      "缺少 USD/TWD 匯率，美股金額維持原幣別分開顯示。匯率由每日同步寫入 fx/USDTWD，" +
+      "還沒寫入前不會自行推估，以免總額看起來正常卻是假的。",
+  });
+
 /* ---------- views ---------- */
 
 const viewOptions = {
+  // 市場是全站共用的鏡片，不是單一頁面的篩選器，換頁後要保持不變
+  market: "all",
   chartBucket: "month",
   chartCurrency: null,
   exposureMode: "symbol",
@@ -905,9 +1028,10 @@ const viewOptions = {
 };
 
 function viewDashboard() {
-  const positions = allPositions();
-  const lots = allRealized();
+  const positions = allPositions().filter(inMarket);
+  const lots = allRealized().filter(inMarket);
   const frag = document.createDocumentFragment();
+  frag.appendChild(marketBar());
 
   const cost = sumByCurrency(positions, (p) => p.totalCost);
   const unreal = {};
@@ -929,17 +1053,34 @@ function viewDashboard() {
     lots.filter((l) => l.sellDate.getFullYear() === thisYear),
     (l) => l.pnl
   );
-  const brokerDividends = brokerDividendTotals();
+  const brokerDividends = brokerDividendTotals().filter(inMarket);
+  const manualDividends = state.dividends.filter(inMarket);
   const brokerDividendCount = brokerDividends.length;
-  const dividendTotal = sumByCurrency(
-    [...state.dividends, ...brokerDividends],
-    (d) => d.amount
-  );
+  const dividendTotal = sumByCurrency([...manualDividends, ...brokerDividends], (d) => d.amount);
 
+  // 只看單一市場時整頁就是同一種幣別，直接用原幣顯示；只有「全部」才需要換算成台幣。
+  const maps = [cost, unreal, value, valuedCost, realizedAll, realizedYear, dividendTotal];
+  const crossCurrency =
+    viewOptions.market === "all" && maps.some((m) => Object.keys(m).some((c) => c !== "TWD"));
+  const converted = crossCurrency && usdTwdRate() !== null;
+
+  const zeroCurrency = viewOptions.market === "US" ? "USD" : "TWD";
+  const tileValue = (byCurrency) => {
+    const twd = converted ? sumTwd(byCurrency) : null;
+    return twd === null ? fmtMultiLines(byCurrency, 0, zeroCurrency) : fmtMoney(twd, "TWD");
+  };
+  const tileClass = (byCurrency) => {
+    const twd = converted ? sumTwd(byCurrency) : null;
+    return pnlClass(twd === null ? byCurrency[dominantCurrency(byCurrency)] || 0 : twd);
+  };
+
+  // 換算後的市值只能跟同樣換算過的成本比，不然報酬率會拿台幣市值除以混幣別成本。
+  const valueTwd = converted ? sumTwd(value) : null;
+  const valuedCostTwd = converted ? sumTwd(valuedCost) : null;
   const mainCurrency = dominantCurrency(value);
-  const valueDominant = value[mainCurrency] || 0;
-  const costDominant = valuedCost[mainCurrency] || 0;
-  const returnPct = costDominant ? ((valueDominant - costDominant) / costDominant) * 100 : null;
+  const returnValue = valueTwd === null ? value[mainCurrency] || 0 : valueTwd;
+  const returnCost = valuedCostTwd === null ? valuedCost[mainCurrency] || 0 : valuedCostTwd;
+  const returnPct = returnCost ? ((returnValue - returnCost) / returnCost) * 100 : null;
   const valueSub = [
     `${positions.length - missingQuotes} 檔已估值`,
     returnPct === null ? null : `報酬率 ${returnPct > 0 ? "+" : ""}${fmtNum(returnPct, 1)}%`,
@@ -948,50 +1089,40 @@ function viewDashboard() {
     .join(" · ");
 
   const grid = el("div", { class: "stat-grid" }, [
-    statTile("目前市值", Object.keys(value).length ? fmtMultiLines(value) : "—", valueSub),
-    statTile("持股成本", fmtMultiLines(cost), `${positions.length} 檔`),
+    statTile("目前市值", Object.keys(value).length ? tileValue(value) : "—", valueSub),
+    statTile("持股成本", tileValue(cost), `${positions.length} 檔`),
     statTile(
       "未實現損益",
-      Object.keys(unreal).length ? fmtMultiLines(unreal) : "—",
+      Object.keys(unreal).length ? tileValue(unreal) : "—",
       missingQuotes ? `${missingQuotes} 檔手動部位未填現價` : "已全部估值",
-      pnlClass(unreal[dominantCurrency(unreal)] || 0)
+      tileClass(unreal)
     ),
-    statTile(
-      `${thisYear} 已實現`,
-      fmtMultiLines(realizedYear),
-      null,
-      pnlClass(realizedYear[dominantCurrency(realizedYear)] || 0)
-    ),
-    statTile(
-      "累計已實現",
-      fmtMultiLines(realizedAll),
-      `${lots.length} 筆平倉`,
-      pnlClass(realizedAll[dominantCurrency(realizedAll)] || 0)
-    ),
+    statTile(`${thisYear} 已實現`, tileValue(realizedYear), null, tileClass(realizedYear)),
+    statTile("累計已實現", tileValue(realizedAll), `${lots.length} 筆平倉`, tileClass(realizedAll)),
     // 永豐配息沒有發放日期，無法歸到某一年，所以這裡用累計而不是年度，
     // 否則明明有幾十萬配息卻顯示「今年 NT$0」，會讓人以為資料沒同步到。
     statTile(
       "累計配息",
-      fmtMultiLines(dividendTotal),
+      tileValue(dividendTotal),
       brokerDividendCount
-        ? `永豐 ${brokerDividendCount} 檔（無日期）· 手動 ${state.dividends.length} 筆`
-        : `${state.dividends.length} 筆紀錄`
+        ? `永豐 ${brokerDividendCount} 檔（無日期）· 手動 ${manualDividends.length} 筆`
+        : `${manualDividends.length} 筆紀錄`
     ),
   ]);
   frag.appendChild(grid);
 
-  const recentRealized = allRealized().slice(0, 5);
+  if (crossCurrency) frag.appendChild(converted ? fxAppliedNote() : fxMissingNote());
+
+  const recentRealized = lots.slice(0, 5);
   frag.appendChild(
     box(
       "最近平倉",
-      recentRealized.length
-        ? recentRealized.map(realizedRow)
-        : blankslate("尚無平倉紀錄"),
+      recentRealized.length ? recentRealized.map(realizedRow) : filteredBlank("尚無平倉紀錄"),
       el("a", { href: "#/realized", text: "全部", class: "mono" })
     )
   );
 
-  const recentManual = state.trades.slice(0, 3);
+  const recentManual = state.trades.filter(inMarket).slice(0, 3);
   if (recentManual.length) {
     frag.appendChild(
       box(
@@ -1002,6 +1133,7 @@ function viewDashboard() {
     );
   }
 
+  // 提醒不受市場鏡片影響（提醒頁本身也沒有市場篩選），這裡跟著保持完整清單
   const now = Date.now();
   const upcoming = state.events.filter((e) => e.eventDate.getTime() >= now - DAY_MS).slice(0, 5);
   frag.appendChild(
@@ -1128,12 +1260,17 @@ function positionRow(p) {
 }
 
 function viewPositions() {
-  const positions = allPositions();
-  if (!positions.length) return box("持股庫存", blankslate("目前沒有持股"));
+  const positions = allPositions().filter(inMarket);
+  const frag = document.createDocumentFragment();
+  frag.appendChild(marketBar());
+
+  if (!positions.length) {
+    frag.appendChild(box("持股庫存", filteredBlank("目前沒有持股")));
+    return frag;
+  }
 
   const missing = positions.filter((p) => p.source === "manual" && p.marketValue === null);
 
-  const frag = document.createDocumentFragment();
   if (missing.length) {
     frag.appendChild(
       el("div", {
@@ -1195,7 +1332,7 @@ function ledgerRow(tx) {
 }
 
 function viewLedger() {
-  const all = allTransactions();
+  const all = allTransactions().filter(inMarket);
   const years = [...new Set(all.map((t) => t.date.getFullYear()))].sort((a, b) => b - a);
   if (viewOptions.ledgerYear !== "all" && !years.includes(viewOptions.ledgerYear)) {
     viewOptions.ledgerYear = "all";
@@ -1288,10 +1425,11 @@ function viewLedger() {
     : [
         all.length
           ? blankslate("這個期間沒有交易紀錄", "換一個年度或月份試試")
-          : blankslate("尚無交易紀錄", "永豐同步的買進批次與平倉紀錄，加上手動輸入的交易都會列在這裡"),
+          : filteredBlank("尚無交易紀錄", "永豐同步的買進批次與平倉紀錄，加上手動輸入的交易都會列在這裡"),
       ];
 
   const frag = document.createDocumentFragment();
+  frag.appendChild(marketBar());
   frag.appendChild(
     box(
       "交易紀錄",
@@ -1453,11 +1591,16 @@ function realizedRow(l) {
 }
 
 function viewRealized() {
-  const lots = allRealized();
-  if (!lots.length) return box("已實現損益", blankslate("尚無平倉紀錄"));
+  const lots = allRealized().filter(inMarket);
+  const frag = document.createDocumentFragment();
+  frag.appendChild(marketBar());
+
+  if (!lots.length) {
+    frag.appendChild(box("已實現損益", filteredBlank("尚無平倉紀錄")));
+    return frag;
+  }
 
   const total = sumByCurrency(lots, (l) => l.pnl);
-  const frag = document.createDocumentFragment();
   frag.appendChild(
     el("div", { class: "stat-grid" }, [
       statTile("累計已實現", fmtMultiLines(total), `${lots.length} 筆`, pnlClass(total[dominantCurrency(total)] || 0)),
@@ -1484,7 +1627,7 @@ function bucketKey(date, bucket) {
 }
 
 function viewChart() {
-  const lots = allRealized();
+  const lots = allRealized().filter(inMarket);
   // 預設選資料筆數最多的幣別，否則可能一進來就落在只有一筆的幣別而畫不出線。
   const counts = {};
   for (const l of lots) counts[l.currency] = (counts[l.currency] || 0) + 1;
@@ -1552,33 +1695,43 @@ function viewChart() {
         );
 
   const frag = document.createDocumentFragment();
+  frag.appendChild(marketBar());
   frag.appendChild(el("div", { class: "box" }, [el("div", { class: "box-body" }, [controls])]));
   frag.appendChild(box("損益走勢", body));
   return frag;
 }
 
 function viewExposure() {
-  const positions = allPositions();
-  if (!positions.length) return box("持股曝險", blankslate("目前沒有持股"));
+  const frag = document.createDocumentFragment();
+  frag.appendChild(marketBar());
 
-  // 不同幣別不能加在同一個圓餅裡（沒有匯率換算，比例會失真），一次只看一種幣別。
-  const exposureValue = (p) => p.marketValue ?? p.totalCost;
-  const byCurrencyCount = {};
-  for (const p of positions) {
-    byCurrencyCount[p.currency] = (byCurrencyCount[p.currency] || 0) + exposureValue(p);
+  const positions = allPositions().filter(inMarket);
+  if (!positions.length) {
+    frag.appendChild(box("持股曝險", filteredBlank("目前沒有持股")));
+    return frag;
   }
-  const currencies = Object.keys(byCurrencyCount).sort(
-    (a, b) => byCurrencyCount[b] - byCurrencyCount[a]
+
+  const exposureValue = (p) => p.marketValue ?? p.totalCost;
+  const byCurrencyTotal = {};
+  for (const p of positions) {
+    byCurrencyTotal[p.currency] = (byCurrencyTotal[p.currency] || 0) + exposureValue(p);
+  }
+  const currencies = Object.keys(byCurrencyTotal).sort(
+    (a, b) => byCurrencyTotal[b] - byCurrencyTotal[a]
   );
-  if (!viewOptions.exposureCurrency || !currencies.includes(viewOptions.exposureCurrency)) {
+
+  // 有匯率才能把不同幣別畫進同一個圓餅；沒有匯率時比例會失真，維持一次只看一種幣別。
+  const merged = currencies.length > 1 && sumTwd(byCurrencyTotal) !== null;
+  if (!merged && !currencies.includes(viewOptions.exposureCurrency)) {
     viewOptions.exposureCurrency = currencies[0];
   }
-  const currency = viewOptions.exposureCurrency;
+  const currency = merged ? "TWD" : viewOptions.exposureCurrency;
 
   const mode = viewOptions.exposureMode;
   const totals = new Map();
-  for (const p of positions.filter((p) => p.currency === currency)) {
-    const value = exposureValue(p);
+  for (const p of positions) {
+    if (!merged && p.currency !== currency) continue;
+    const value = merged ? toTwd(exposureValue(p), p.currency) : exposureValue(p);
     const name = mode === "sector" ? sectorOf(p.symbol) : p.symbol;
     totals.set(name, (totals.get(name) || 0) + value);
   }
@@ -1616,8 +1769,7 @@ function viewExposure() {
     }
   );
 
-  const frag = document.createDocumentFragment();
-  if (currencies.length > 1) {
+  if (!merged && currencies.length > 1) {
     frag.appendChild(
       el("div", { class: "box" }, [
         el("div", { class: "box-body" }, [
@@ -1629,10 +1781,22 @@ function viewExposure() {
               render();
             }
           ),
+          el("div", {
+            class: "row-sub",
+            style: "margin-top:8px",
+            text: "缺少 USD/TWD 匯率，無法把不同幣別放進同一個圓餅，先分幣別檢視。",
+          }),
         ]),
       ])
     );
   }
+
+  const sourceNote =
+    "永豐部位用券商給的市值，手動部位有填現價才用市值，其餘用成本。產業對照表在 web/app.js 的 SECTORS，可自行擴充。";
+  const scopeNote = merged
+    ? `已把美股按 1 USD = ${fmtMoney(usdTwdRate(), "TWD", 3)} 換算成台幣後合併計算。`
+    : `以 ${currency} 計價的部位。`;
+
   frag.appendChild(
     box("持股曝險比例", [
       el("div", { class: "box-body" }, [donutChart(slices), legend]),
@@ -1640,10 +1804,7 @@ function viewExposure() {
         class: "box-body",
         style: "border-top:1px solid var(--border-muted)",
       }, [
-        el("div", {
-          class: "row-sub",
-          text: `以 ${currency} 計價的部位（不同幣別不換算匯率，分開檢視）。永豐部位用券商給的市值，手動部位有填現價才用市值，其餘用成本。產業對照表在 web/app.js 的 SECTORS，可自行擴充。`,
-        }),
+        el("div", { class: "row-sub", text: `${scopeNote}${sourceNote}` }),
       ]),
     ], controls)
   );
@@ -1651,8 +1812,14 @@ function viewExposure() {
 }
 
 function viewStats() {
-  const lots = allRealized();
-  if (!lots.length) return box("交易統計", blankslate("尚無平倉紀錄", "統計需要至少一筆已實現損益"));
+  const lots = allRealized().filter(inMarket);
+  const frag = document.createDocumentFragment();
+  frag.appendChild(marketBar());
+
+  if (!lots.length) {
+    frag.appendChild(box("交易統計", filteredBlank("尚無平倉紀錄", "統計需要至少一筆已實現損益")));
+    return frag;
+  }
 
   const wins = lots.filter((l) => l.pnl > 0);
   const losses = lots.filter((l) => l.pnl < 0);
@@ -1666,7 +1833,6 @@ function viewStats() {
   const avgDays = withDays.length ? withDays.reduce((s, l) => s + l.holdingDays, 0) / withDays.length : null;
   const currency = dominantCurrency(sumByCurrency(lots, (l) => l.pnl));
 
-  const frag = document.createDocumentFragment();
   frag.appendChild(
     el("div", { class: "stat-grid" }, [
       statTile("勝率", `${fmtNum(winRate, 1)}%`, `${wins.length} 勝 / ${losses.length} 敗`),
@@ -1717,23 +1883,28 @@ function viewStats() {
 }
 
 function viewDividends() {
-  const brokerTotals = brokerDividendTotals();
-  if (!state.dividends.length && !brokerTotals.length)
-    return box("股利紀錄", blankslate("尚無股利紀錄", "同步腳本寫入後會顯示在這裡"));
+  const brokerTotals = brokerDividendTotals().filter(inMarket);
+  const dividends = state.dividends.filter(inMarket);
+  const frag = document.createDocumentFragment();
+  frag.appendChild(marketBar());
+
+  if (!dividends.length && !brokerTotals.length) {
+    frag.appendChild(box("股利紀錄", filteredBlank("尚無股利紀錄", "同步腳本寫入後會顯示在這裡")));
+    return frag;
+  }
 
   const byYear = new Map();
-  for (const d of state.dividends) {
+  for (const d of dividends) {
     const y = d.payDate.getFullYear();
     if (!byYear.has(y)) byYear.set(y, []);
     byYear.get(y).push(d);
   }
 
-  const frag = document.createDocumentFragment();
-  const total = sumByCurrency(state.dividends, (d) => d.amount);
+  const total = sumByCurrency(dividends, (d) => d.amount);
   const brokerTotal = sumByCurrency(brokerTotals, (s) => s.amount);
   frag.appendChild(
     el("div", { class: "stat-grid" }, [
-      statTile("手動紀錄股利", fmtMultiLines(total), `${state.dividends.length} 筆`),
+      statTile("手動紀錄股利", fmtMultiLines(total), `${dividends.length} 筆`),
       brokerTotals.length
         ? statTile("永豐累計配息", fmtMultiLines(brokerTotal), `${brokerTotals.length} 檔 · 無發放日期`)
         : null,

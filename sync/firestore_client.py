@@ -114,8 +114,14 @@ def replace_positions(db, broker: str, positions: list[dict]):
 
 
 def _lot_doc_id(broker: str, lot: dict):
-    # 庫存明細的 dseq 實測可能是空字串，沒有可用序號時退而用成本數值當識別
-    key = lot.get("dseq") or f"c{round(lot.get('cost', 0))}"
+    """庫存明細的 dseq 實測是空字串，所以 open 批次改用序號當識別。
+
+    原本用成本數值當識別，結果同一天、同一檔、同金額的兩筆買進會撞 ID 互相覆蓋
+    （實測 00891 因此少掉 5,295 元，批次加總對不上部位總成本）。
+    open 批次每次同步都整批覆蓋，序號只要在單次同步內唯一就夠；
+    closed 批次要跨次穩定，而它的 dseq 有值，照用即可。
+    """
+    key = lot.get("dseq") or f"i{lot.get('seq', 0)}"
     return f"{broker}_{lot['status']}_{lot['symbol']}_{lot['tradeDate']}_{key}"
 
 

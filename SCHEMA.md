@@ -156,6 +156,20 @@ document ID = `sinopac_{status}_{symbol}_{tradeDate}_{key}`，`key` 取 `dseq`�
 | source | string | `"sinopac"` \| `"manual"` |
 | updatedAt | string | ISO8601 |
 
+## collection: `fx`
+匯率。document ID = `{base}{quote}`，例如 `USDTWD`。由 `sync/fx_sync.py` 每日更新。
+
+總覽的加總需要把美股部位換算成台幣，前端不自己抓匯率（瀏覽器直連有 CORS 與離線問題），
+一律讀這裡。**沒有匯率時前端不可以自己假設一個數字**，要退回分幣別各自顯示。
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| base | string | `"USD"` |
+| quote | string | `"TWD"` |
+| rate | number | 1 base = 多少 quote |
+| source | string | 資料來源網域，方便日後追查 |
+| updatedAt | string | ISO8601 |
+
 ## collection: `dividends`
 手動輸入的股利紀錄。永豐**沒有**股利查詢 API，台股的配息改用 `positions.exDividends`
 與 `realized.exDividendAmt`（累計金額，沒有發放日期）呈現。
