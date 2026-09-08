@@ -113,6 +113,46 @@ def replace_positions(db, broker: str, positions: list[dict]):
     return len(written), stale
 
 
+def _lot_doc_id(broker: str, lot: dict):
+    # 庫存明細的 dseq 實測可能是空字串，沒有可用序號時退而用成本數值當識別
+    key = lot.get("dseq") or f"c{round(lot.get('cost', 0))}"
+    return f"{broker}_{lot['status']}_{lot['symbol']}_{lot['tradeDate']}_{key}"
+
+
+def replace_open_lots(db, broker: str, lots: list[dict]):
+    """整批覆蓋仍持有的買進批次（賣掉了就該從清單消失）。closed 的批次不動。"""
+    written = set()
+    for lot in lots:
+        doc_id = _lot_doc_id(broker, lot)
+        data = dict(lot)
+        data["broker"] = broker
+        data["syncedAt"] = _now_iso()
+        db.collection("lots").document(doc_id).set(data)
+        written.add(doc_id)
+
+    stale = 0
+    query = (
+        db.collection("lots")
+        .where(filter=FieldFilter("broker", "==", broker))
+        .where(filter=FieldFilter("status", "==", "open"))
+    )
+    for doc in query.stream():
+        if doc.id not in written:
+            doc.reference.delete()
+            stale += 1
+    return len(written), stale
+
+
+def upsert_closed_lot(db, broker: str, lot: dict):
+    """已平倉部位的進場批次是歷史紀錄，只增不刪。"""
+    doc_id = _lot_doc_id(broker, lot)
+    data = dict(lot)
+    data["broker"] = broker
+    data["syncedAt"] = _now_iso()
+    db.collection("lots").document(doc_id).set(data, merge=True)
+    return doc_id
+
+
 def upsert_realized(db, broker: str, record: dict):
     """已實現損益是歷史事實，只增不刪。dseq 實測唯一，加日期防跨年重複。"""
     doc_id = f"{broker}_{record['sellDate']}_{record['dseq']}"

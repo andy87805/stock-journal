@@ -29,6 +29,10 @@ service cloud.firestore {
       allow read, write: if ownerOnly();
     }
 
+    match /lots/{lotId} {
+      allow read, write: if ownerOnly();
+    }
+
     match /trades/{tradeId} {
       allow read, write: if ownerOnly();
     }

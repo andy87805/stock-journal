@@ -92,6 +92,35 @@ pnl       = sell_cost − buy_cost
 | dseq | string | 券商交易序號 |
 | syncedAt | string | ISO8601 |
 
+## collection: `lots`
+逐筆**買進**紀錄。永豐雖然沒有成交明細 API，但兩個 detail API 其實帶著各批買進的日期與成本，
+把它們存下來就能還原交易級別的買進紀錄（賣出看 `realized`）。
+
+document ID = `sinopac_{status}_{symbol}_{tradeDate}_{key}`，`key` 取 `dseq`，
+`dseq` 為空（庫存明細實測會是空字串）時用成本數值代替。
+
+`status` 為 `"open"` 的是目前仍持有的批次，每次同步**整批覆蓋**（賣掉就該消失）；
+`"closed"` 的是已平倉部位的進場批次，屬歷史紀錄只增不刪。
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| broker | string | `"sinopac"` |
+| symbol | string | |
+| market | string | `"TW"` |
+| currency | string | `"TWD"` |
+| status | string | `"open"`（仍持有）\| `"closed"`（已平倉的進場批次） |
+| tradeDate | string | 買進日 `YYYY-MM-DD` |
+| lots | number | 張數，零股為 0（同其他 collection） |
+| cost | number | 該批總成本（`list_position_detail[].price` 或 `list_profit_loss_detail[].cost`，都是總額不是單價） |
+| unitPrice | number? | 每股價格。只有 `closed`（`list_profit_loss_detail[].price`）有，`open` 的明細沒給單價，留 null |
+| fee | number | |
+| exDividends | number | `open` 取 `ex_dividends`，`closed` 取 `ex_dividend_amt` |
+| dseq | string | 券商序號，`open` 可能是空字串 |
+| syncedAt | string | ISO8601 |
+
+> 這個 collection 是「交易紀錄」頁的買進來源。它和 `positions` 的 `totalCost` 是同一批
+> 明細加總出來的，數字應該一致；不一致就是同步有問題。
+
 ## collection: `trades`
 手動輸入的買賣紀錄（美股等永豐同步不到的部分）。document ID = `{broker}_{externalId}`。
 

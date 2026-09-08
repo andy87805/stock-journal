@@ -74,9 +74,14 @@ def weighted_entry_date(details):
 
 
 def build_positions(api, account):
-    """庫存 + 逐檔明細（明細用來取總成本、最早買進日、累計配息）。"""
+    """庫存 + 逐檔明細。
+
+    明細除了加總成本/配息，本身就是「各批買進紀錄」（有買進日期），一併回傳存成 lots，
+    交易紀錄頁的買進資料就是靠這個。
+    """
     positions = []
     quotes = []
+    open_lots = []
     for pos in api.list_positions(account):
         symbol = str(getattr(pos, "code", "")).strip()
         if not symbol:
@@ -93,11 +98,28 @@ def build_positions(api, account):
         try:
             for det in api.list_position_detail(account, getattr(pos, "id", 0)):
                 # 明細的 price 是「該批總成本」，不是單價
-                total_cost += _f(getattr(det, "price", 0))
-                ex_dividends += _f(getattr(det, "ex_dividends", 0))
+                lot_cost = _f(getattr(det, "price", 0))
+                lot_dividends = _f(getattr(det, "ex_dividends", 0))
+                total_cost += lot_cost
+                ex_dividends += lot_dividends
                 day = _date_str(getattr(det, "date", None))
                 if day:
                     entry_dates.append(day)
+                    open_lots.append(
+                        {
+                            "symbol": symbol,
+                            "market": MARKET,
+                            "currency": CURRENCY,
+                            "status": "open",
+                            "tradeDate": day,
+                            "lots": _f(getattr(det, "quantity", 0)),
+                            "cost": round(lot_cost, 2),
+                            "unitPrice": None,  # 庫存明細只給總額，沒有單價
+                            "fee": _f(getattr(det, "fee", 0)),
+                            "exDividends": round(lot_dividends, 2),
+                            "dseq": str(getattr(det, "dseq", "") or ""),
+                        }
+                    )
         except Exception as exc:
             print(f"  [warn] {symbol} 庫存明細讀取失敗，改用均價推估總成本: {exc}")
 
@@ -125,7 +147,7 @@ def build_positions(api, account):
         if last_price > 0:
             quotes.append({"symbol": symbol, "price": last_price})
 
-    return positions, quotes
+    return positions, quotes, open_lots
 
 
 def build_realized(api, account, begin, end):
@@ -136,16 +158,20 @@ def build_realized(api, account, begin, end):
     當場把明細抓完才能查下一段，不能先收集所有紀錄最後再統一抓明細。
     """
     records = []
+    closed_lots = []
     window_start = begin
     while window_start <= end:  # <= 才不會漏掉最後一天（當天平倉的交易）
         window_end = min(window_start + timedelta(days=WINDOW_DAYS), end)
-        records.extend(_build_realized_window(api, account, window_start, window_end))
+        window_records, window_lots = _build_realized_window(api, account, window_start, window_end)
+        records.extend(window_records)
+        closed_lots.extend(window_lots)
         window_start = window_end + timedelta(days=1)
-    return records
+    return records, closed_lots
 
 
 def _build_realized_window(api, account, begin, end):
     records = []
+    closed_lots = []
     for pnl in api.list_profit_loss(account, begin.isoformat(), end.isoformat()):
         symbol = str(getattr(pnl, "code", "")).strip()
         sell_date = _date_str(getattr(pnl, "date", None))
@@ -162,10 +188,30 @@ def _build_realized_window(api, account, begin, end):
         try:
             details = list(api.list_profit_loss_detail(account, getattr(pnl, "id", 0)))
             for det in details:
-                entry_cost += _f(getattr(det, "cost", 0))
+                lot_cost = _f(getattr(det, "cost", 0))
+                lot_dividends = _f(getattr(det, "ex_dividend_amt", 0))
+                entry_cost += lot_cost
                 fee += _f(getattr(det, "fee", 0))
                 tax += _f(getattr(det, "tax", 0))
-                ex_dividend_amt += _f(getattr(det, "ex_dividend_amt", 0))
+                ex_dividend_amt += lot_dividends
+                # 這些明細就是該次平倉對應的各批進場紀錄，存下來當交易紀錄的買進資料
+                day = _date_str(getattr(det, "date", None))
+                if day:
+                    closed_lots.append(
+                        {
+                            "symbol": symbol,
+                            "market": MARKET,
+                            "currency": CURRENCY,
+                            "status": "closed",
+                            "tradeDate": day,
+                            "lots": _f(getattr(det, "quantity", 0)),
+                            "cost": round(lot_cost, 2),
+                            "unitPrice": _f(getattr(det, "price", 0)) or None,
+                            "fee": _f(getattr(det, "fee", 0)),
+                            "exDividends": round(lot_dividends, 2),
+                            "dseq": str(getattr(det, "dseq", "") or ""),
+                        }
+                    )
             entry_date = weighted_entry_date(details)
         except Exception as exc:
             print(f"  [warn] {symbol} {sell_date} 損益明細讀取失敗: {exc}")
@@ -199,7 +245,7 @@ def _build_realized_window(api, account, begin, end):
                 "dseq": dseq,
             }
         )
-    return records
+    return records, closed_lots
 
 
 def generate_dry_run_data():
@@ -273,7 +319,25 @@ def generate_dry_run_data():
         },
     ]
     quotes = [{"symbol": p["symbol"], "price": p["lastPrice"]} for p in positions]
-    return positions, realized, quotes
+    lots = [
+        {
+            "symbol": "0050", "market": MARKET, "currency": CURRENCY, "status": "open",
+            "tradeDate": "2025-06-18", "lots": 6, "cost": 243594.0, "unitPrice": None,
+            "fee": 0.0, "exDividends": 12787.0, "dseq": "",
+        },
+        {
+            # 零股批次：lots 是 0，所以介面不能拿張數當「有沒有交易」的判斷
+            "symbol": "0050", "market": MARKET, "currency": CURRENCY, "status": "open",
+            "tradeDate": "2025-07-02", "lots": 0, "cost": 4760.0, "unitPrice": None,
+            "fee": 0.0, "exDividends": 0.0, "dseq": "",
+        },
+        {
+            "symbol": "0056", "market": MARKET, "currency": CURRENCY, "status": "closed",
+            "tradeDate": "2021-05-26", "lots": 0, "cost": 1984.0, "unitPrice": 34.3,
+            "fee": 10.0, "exDividends": 1311.0, "dseq": "E722X",
+        },
+    ]
+    return positions, realized, quotes, lots
 
 
 def main():
@@ -287,15 +351,18 @@ def main():
     args = parser.parse_args()
 
     if args.dry_run:
-        positions, realized, quotes = generate_dry_run_data()
-        print(json.dumps({"positions": positions, "realized": realized, "quotes": quotes},
-                         ensure_ascii=False, indent=2))
+        positions, realized, quotes, lots = generate_dry_run_data()
+        print(json.dumps(
+            {"positions": positions, "realized": realized, "quotes": quotes, "lots": lots},
+            ensure_ascii=False, indent=2))
         return
 
     from firestore_client import (
         init_firestore,
+        replace_open_lots,
         replace_positions,
         set_sync_meta,
+        upsert_closed_lot,
         upsert_quote,
         upsert_realized,
     )
@@ -319,8 +386,8 @@ def main():
         end = date.today()
         begin = end - timedelta(days=args.days)
 
-        positions, quotes = build_positions(api, account)
-        realized = build_realized(api, account, begin, end)
+        positions, quotes, open_lots = build_positions(api, account)
+        realized, closed_lots = build_realized(api, account, begin, end)
 
         written, stale = replace_positions(db, BROKER, positions)
         print(f"[shioaji_sync] 庫存 {written} 檔（清掉 {stale} 筆已不存在）")
@@ -328,6 +395,13 @@ def main():
         for record in realized:
             upsert_realized(db, BROKER, record)
         print(f"[shioaji_sync] 已實現損益 {len(realized)} 筆（{begin} ~ {end}）")
+
+        lots_written, lots_stale = replace_open_lots(db, BROKER, open_lots)
+        print(f"[shioaji_sync] 持有中買進批次 {lots_written} 筆（清掉 {lots_stale} 筆已不存在）")
+
+        for lot in closed_lots:
+            upsert_closed_lot(db, BROKER, lot)
+        print(f"[shioaji_sync] 已平倉的進場批次 {len(closed_lots)} 筆")
 
         for quote in quotes:
             upsert_quote(db, MARKET, quote["symbol"], quote["price"], BROKER)
