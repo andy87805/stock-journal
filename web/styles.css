@@ -94,9 +94,9 @@ a:hover {
   z-index: 20;
 }
 
+/* 標誌的紅綠藍是照 PWA 桌面圖示寫死在 SVG 裡的，不跟著主題變色 */
 .app-header .logo {
   flex-shrink: 0;
-  fill: var(--header-fg);
 }
 
 .app-header .title {
@@ -586,10 +586,6 @@ textarea:focus {
 .auth-card .brand {
   text-align: center;
   margin-bottom: 20px;
-}
-
-.auth-card .brand svg {
-  fill: var(--fg);
 }
 
 .auth-card .brand div {
