@@ -1,4 +1,9 @@
 :root {
+  /* iOS 26 頂端模糊帶的高度，用 safe-area-inset-top 的倍數表示。
+     照 iPhone 17 Pro Max 的截圖量測校正：安全區 62px，落在 70-81px 的文字是糊的，
+     114px 以下才銳利。62 × 1.65 ≈ 102，加上 header 自己的內距後文字剛好落在 114 以下。
+     頂端如果還是糊就把這個數字調大，覺得上面留太多空白就調小（會換回一點模糊）。 */
+  --top-blur-zone: 1.65;
   --canvas: #ffffff;
   --canvas-subtle: #f6f8fa;
   --canvas-inset: #f6f8fa;
@@ -85,16 +90,20 @@ a:hover {
   position: sticky;
   top: 0;
   z-index: 20;
+  background: var(--header-bg);
+  /* iOS 26 會對網頁內容的頂端做一段漸層模糊（系統的 scroll edge effect），
+     網頁端沒有可以關掉的開關。範圍比 safe-area 大得多：實測 iPhone 17 Pro Max
+     安全區是 62px，但落在 70-81px 的文字仍然是糊的，要到 114px 以下才銳利。
+     所以頂端這一段只鋪背景、不放任何內容，把 header 的文字推到糊不到的位置。
+     用安全區的倍數而不是固定 px：模糊帶高度是跟著狀態列區域縮放的，
+     寫死的話在安全區較小的機型上會白白多留一大塊。 */
+  padding-top: max(12px, calc(env(safe-area-inset-top, 0px) * var(--top-blur-zone)));
 }
 
 .app-header {
   background: var(--header-bg);
   color: var(--header-fg);
   padding: 12px 16px;
-  /* iOS 在畫面頂端會對狀態列底下的內容做一層毛玻璃，緊貼安全區邊界的東西會被糊掉。
-     所以除了 safe-area 之外再多留一段，讓標題與按鈕完全離開那條帶狀區域。
-     沒有安全區的裝置（桌機）env() 回退成 0，等於單純的 20px 內距。 */
-  padding-top: calc(env(safe-area-inset-top, 0px) + 20px);
   display: flex;
   align-items: center;
   gap: 10px;
