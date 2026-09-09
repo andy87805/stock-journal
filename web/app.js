@@ -91,8 +91,12 @@ const isEtf = (symbol, market) =>
 // 顯示名稱：介面上只有 2330 這種代號很難認，改成「台積電 2330」。
 // 台股名稱由 sync/symbols_sync.py 從 TWSE 開放資料寫進 symbols；
 // 美股名稱是嘉信匯出檔匯入時從 Description 一併寫入的。查不到就只顯示代號。
+// Firestore 的 document ID 不能含斜線（會被當成路徑分隔，BRK/B 會變成三段而寫入失敗）。
+// document ID 與 state 的索引鍵一律走這個函式，兩邊才不會一個寫得進去、一個查不到。
+const symbolKey = (market, symbol) => `${market}:${String(symbol ?? "").replace(/\//g, "-")}`;
+
 function symbolName(symbol, market = "TW") {
-  const hit = state.symbols[`${market}:${symbol}`];
+  const hit = state.symbols[symbolKey(market, symbol)];
   return hit && hit.name ? hit.name : "";
 }
 
@@ -284,7 +288,7 @@ function computeBook(trades) {
 }
 
 const marketValue = (p) => {
-  const q = state.quotes[`${p.market}:${p.symbol}`];
+  const q = state.quotes[symbolKey(p.market, p.symbol)];
   return q && q.price ? p.shares * q.price : null;
 };
 
@@ -317,7 +321,7 @@ function allPositions() {
 
   for (const p of computeBook(state.trades).positions) {
     const mv = marketValue(p);
-    const q = state.quotes[`${p.market}:${p.symbol}`];
+    const q = state.quotes[symbolKey(p.market, p.symbol)];
     out.push({
       source: p.broker,
       symbol: p.symbol,
@@ -703,7 +707,7 @@ function subscribe() {
 
 async function saveQuote(market, symbol, price) {
   await setDoc(
-    doc(db, "quotes", `${market}:${symbol}`),
+    doc(db, "quotes", symbolKey(market, symbol)),
     { symbol, market, price, updatedAt: new Date().toISOString() },
     { merge: true }
   );
@@ -784,11 +788,15 @@ function parseOptionContract(row) {
   };
 }
 
-const contractKey = (c) => `schwab_${c.underlying}_${c.expiry}_${c.strike}_${c.kind}`;
+const contractKey = (c) =>
+  `schwab_${String(c.underlying).replace(/\//g, "-")}_${c.expiry}_${c.strike}_${c.kind}`;
 
 // 同一筆再匯入一次要落在同一個 doc，不能變兩筆。用內容湊出穩定 id。
 const stableId = (parts) =>
   parts.map((p) => String(p ?? "").replace(/[^\w.-]/g, "")).join("_");
+
+const isTransactionNarrative = (desc) =>
+  /TDA TRAN|@\s*[\d.]|^(BOUGHT|SOLD)/i.test(String(desc || ""));
 
 const NAME_KEEP_UPPER = new Set(["ETF", "REIT", "ADR", "USA", "US", "II", "III", "IV", "AG", "SA", "NV", "PLC"]);
 
@@ -813,6 +821,7 @@ function parseSchwabExport(json) {
   };
   const contracts = new Map();
   const optionRows = [];
+  const nameTally = {};
 
   for (const row of rows) {
     const action = String(row.Action || "").trim();
@@ -846,7 +855,10 @@ function parseSchwabExport(json) {
         out.unclassified.push({ action, symbol, date: row.Date, why: "缺少代號、日期或股數" });
         continue;
       }
-      if (row.Description && !out.names[symbol]) out.names[symbol] = titleCaseName(row.Description);
+      if (row.Description) {
+        const tally = (nameTally[symbol] = nameTally[symbol] || {});
+        tally[row.Description] = (tally[row.Description] || 0) + 1;
+      }
       const externalId = stableId([date, symbol, isBuy ? "B" : "S", quantity, price, amount]);
       out.trades.push({
         broker: "schwab", symbol, market: "US", currency: "USD",
@@ -926,6 +938,15 @@ function parseSchwabExport(json) {
     c.staleOpen = c.status === "open" && c.expiry < new Date().toISOString().slice(0, 10);
     out.options.push(c);
   }
+  // Description 有時是搬帳的交易敘述（「TDA TRAN - Bought 1 (BRK B) @311.82」）而不是公司名。
+  // 排掉那些之後取出現次數最多的；全部都是敘述就不給名稱，介面退回只顯示代號。
+  for (const [symbol, tally] of Object.entries(nameTally)) {
+    const best = Object.entries(tally)
+      .filter(([desc]) => !isTransactionNarrative(desc))
+      .sort((a, b) => b[1] - a[1])[0];
+    if (best) out.names[symbol] = titleCaseName(best[0]);
+  }
+
   out.options.sort((a, b) => String(b.openDate || "").localeCompare(String(a.openDate || "")));
   return out;
 }
@@ -965,7 +986,7 @@ async function importSchwab(parsed, onProgress) {
   // 匯出檔的 Description 就是公司名稱，順便存起來讓介面顯示「Tesla Inc TSLA」
   for (const [symbol, name] of Object.entries(parsed.names)) {
     writes.push({
-      ref: doc(db, "symbols", `US:${symbol}`),
+      ref: doc(db, "symbols", symbolKey("US", symbol)),
       data: { symbol, market: "US", name, source: "schwab", updatedAt: syncedAt },
     });
   }
