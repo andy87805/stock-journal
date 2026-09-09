@@ -52,6 +52,12 @@ jobs:
         continue-on-error: true
         run: python sync/calendar_sync.py
 
+      # 台股現價由永豐同步帶出來，美股沒有券商 API 可用，另外抓
+      - name: Sync Quotes (美股現價)
+        id: quotes
+        continue-on-error: true
+        run: python sync/quotes_sync.py
+
       # 介面要顯示「台積電 2330」而不只是代號，名稱從 TWSE 開放資料抓
       - name: Sync Symbols (代號名稱)
         id: symbols
@@ -80,6 +86,7 @@ jobs:
           if [ "${{ steps.shioaji.outcome }}" = "failure" ] || \
              [ "${{ steps.schwab.outcome }}" = "failure" ] || \
              [ "${{ steps.calendar.outcome }}" = "failure" ] || \
+             [ "${{ steps.quotes.outcome }}" = "failure" ] || \
              [ "${{ steps.symbols.outcome }}" = "failure" ] || \
              [ "${{ steps.fx.outcome }}" = "failure" ] || \
              [ "${{ steps.reminders.outcome }}" = "failure" ]; then

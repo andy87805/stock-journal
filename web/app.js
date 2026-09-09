@@ -1345,7 +1345,7 @@ function viewDashboard() {
     statTile(
       "未實現損益",
       Object.keys(unreal).length ? tileValue(unreal) : "—",
-      missingQuotes ? `${missingQuotes} 檔手動部位未填現價` : "已全部估值",
+      missingQuotes ? `${missingQuotes} 檔沒有現價，未計入` : "已全部估值",
       tileClass(unreal)
     ),
     statTile(`${thisYear} 已實現`, tileValue(realizedYear), null, tileClass(realizedYear)),

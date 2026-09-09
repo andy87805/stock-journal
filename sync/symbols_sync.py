@@ -64,7 +64,7 @@ def main():
         print(json.dumps(symbols[:5], ensure_ascii=False, indent=2))
         return
 
-    from firestore_client import init_firestore, set_sync_meta
+    from firestore_client import init_firestore, set_sync_meta, symbol_key
 
     db = init_firestore()
     try:
@@ -84,7 +84,7 @@ def main():
         for s in symbols:
             if wanted is not None and s["symbol"] not in wanted:
                 continue
-            ref = db.collection("symbols").document(f"{MARKET}:{s['symbol']}")
+            ref = db.collection("symbols").document(symbol_key(MARKET, s["symbol"]))
             batch.set(ref, {**s, "updatedAt": now}, merge=True)
             written += 1
             pending += 1

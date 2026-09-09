@@ -21,6 +21,15 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def symbol_key(market: str, symbol: str) -> str:
+    """代號可能含斜線（BRK/B），而 Firestore 會把斜線當成路徑分隔導致寫入失敗。
+
+    前端 web/app.js 的 symbolKey() 用同一條規則，兩邊產生的 document ID 必須一致，
+    否則會變成這邊寫得進去、前端卻查不到。
+    """
+    return f"{market}:{str(symbol).replace('/', '-')}"
+
+
 def _parse_service_account(raw):
     """接受 base64 或原始 JSON。
 
@@ -170,7 +179,7 @@ def upsert_realized(db, broker: str, record: dict):
 
 
 def upsert_quote(db, market: str, symbol: str, price: float, source: str):
-    doc_id = f"{market}:{symbol}"
+    doc_id = symbol_key(market, symbol)
     db.collection("quotes").document(doc_id).set(
         {
             "symbol": symbol,
