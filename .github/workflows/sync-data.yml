@@ -9,20 +9,43 @@ on:
     - cron: "30 21 * * 1-5"
   workflow_dispatch: {}
 
+# 兩段式：
+#   brokers  每個使用者各跑一次，抓自己的券商資料寫進 users/{uid}/
+#   shared   跑一次就好，抓所有人都要用的市場資料（現價/名稱/匯率/行事曆）
+# 分開的原因：市場資料是共用的，每個使用者重複抓一次只是白白多打 API。
 jobs:
-  sync:
+  brokers:
     runs-on: ubuntu-latest
+    strategy:
+      # 一個人的券商掛掉不該讓另一個人的同步也停掉
+      fail-fast: false
+      matrix:
+        include:
+          - name: owner
+            uid_secret: SYNC_UID_OWNER
+            shioaji_key_secret: SHIOAJI_API_KEY
+            shioaji_secret_secret: SHIOAJI_API_SECRET
+            recipient_secret: RECIPIENT_EMAIL
+          # 第二個使用者。對應的 secret 沒設定的話整個 matrix 項目會自己跳過，
+          # 不會每次執行都固定失敗（久了就會習慣性忽略失敗通知）。
+          - name: partner
+            uid_secret: SYNC_UID_PARTNER
+            shioaji_key_secret: SHIOAJI_API_KEY_PARTNER
+            shioaji_secret_secret: SHIOAJI_API_SECRET_PARTNER
+            recipient_secret: RECIPIENT_EMAIL_PARTNER
     env:
       FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-      SHIOAJI_API_KEY: ${{ secrets.SHIOAJI_API_KEY }}
-      SHIOAJI_API_SECRET: ${{ secrets.SHIOAJI_API_SECRET }}
+      # 決定這一輪要把資料寫進誰的 users/{uid} 底下。沒設定時同步腳本會直接失敗，
+      # 而不是預設成某個人——預設值會把 A 的券商資料靜靜寫進 B 的帳號。
+      SYNC_USER_UID: ${{ secrets[matrix.uid_secret] }}
+      SHIOAJI_API_KEY: ${{ secrets[matrix.shioaji_key_secret] }}
+      SHIOAJI_API_SECRET: ${{ secrets[matrix.shioaji_secret_secret] }}
       SCHWAB_CLIENT_ID: ${{ secrets.SCHWAB_CLIENT_ID }}
       SCHWAB_CLIENT_SECRET: ${{ secrets.SCHWAB_CLIENT_SECRET }}
       SCHWAB_REFRESH_TOKEN: ${{ secrets.SCHWAB_REFRESH_TOKEN }}
-      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
       SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-      RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+      RECIPIENT_EMAIL: ${{ secrets[matrix.recipient_secret] }}
     steps:
       - uses: actions/checkout@v4
 
@@ -32,10 +55,21 @@ jobs:
 
       - run: pip install -r sync/requirements.txt
 
-      # 三支腳本各自 continue-on-error，避免其中一個掛掉擋住其他兩個
-      # （例如永豐 API 掛了不該影響 Schwab 或 calendar 同步）
+      # 這個使用者還沒設定 UID，代表他不存在（或還沒接券商），整個 job 就不用跑
+      - name: Check whether this user is configured
+        id: gate
+        run: |
+          if [ -z "$SYNC_USER_UID" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "${{ matrix.name }} 沒有設定 ${{ matrix.uid_secret }}，跳過"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 每支腳本各自 continue-on-error，避免其中一個掛掉擋住其他的
       - name: Sync Shioaji (台股)
         id: shioaji
+        if: steps.gate.outputs.configured == 'true' && env.SHIOAJI_API_KEY != ''
         continue-on-error: true
         run: python sync/shioaji_sync.py
 
@@ -43,9 +77,50 @@ jobs:
       # 否則每次執行都會固定失敗，久了就會習慣性忽略失敗通知
       - name: Sync Schwab (美股)
         id: schwab
-        if: env.SCHWAB_CLIENT_ID != ''
+        if: steps.gate.outputs.configured == 'true' && env.SCHWAB_CLIENT_ID != ''
         continue-on-error: true
         run: python sync/schwab_sync.py
+
+      # 行事曆是共用的，但提醒信要篩成自己的持股再寄到自己的信箱，所以放在這個 job
+      # 這個 workflow 一天跑兩次（台股收盤 + 美股收盤），提醒信只在台股那一輪寄，避免一天兩封
+      - name: Send calendar reminders (除權息/財報提醒信)
+        id: reminders
+        if: >-
+          steps.gate.outputs.configured == 'true' && env.RECIPIENT_EMAIL != '' &&
+          (github.event_name == 'workflow_dispatch' || github.event.schedule == '35 5 * * 1-5')
+        continue-on-error: true
+        run: python sync/send_reminders.py
+
+      # 前面幾步都設了 continue-on-error，job 本身不會因此變紅
+      # 這一步手動檢查有沒有任一步失敗，有的話讓 job 失敗
+      # 好處：GitHub 內建的失敗通知信才會正常觸發
+      - name: Check for failures
+        if: always()
+        run: |
+          if [ "${{ steps.shioaji.outcome }}" = "failure" ] || \
+             [ "${{ steps.schwab.outcome }}" = "failure" ] || \
+             [ "${{ steps.reminders.outcome }}" = "failure" ]; then
+            echo "${{ matrix.name }} 至少一支同步腳本失敗，詳見上方對應步驟的 log"
+            exit 1
+          fi
+
+  shared:
+    runs-on: ubuntu-latest
+    # 券商同步先跑完，這樣新買的股票在同一輪就能抓到現價與名稱
+    needs: brokers
+    # 就算某個人的券商同步失敗，共用的行情資料還是該更新
+    if: always()
+    env:
+      FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r sync/requirements.txt
 
       - name: Sync Calendar (除權息/財報日)
         id: calendar
@@ -70,26 +145,13 @@ jobs:
         continue-on-error: true
         run: python sync/fx_sync.py
 
-      # 這個 workflow 一天跑兩次（台股收盤 + 美股收盤），提醒信只在台股那一輪寄，避免一天兩封
-      - name: Send calendar reminders (除權息/財報提醒信)
-        id: reminders
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '35 5 * * 1-5'
-        continue-on-error: true
-        run: python sync/send_reminders.py
-
-      # 前面幾步都設了 continue-on-error，job 本身不會因此變紅
-      # 這一步手動檢查有沒有任一步失敗，有的話讓 job 失敗
-      # 好處：GitHub 內建的失敗通知信才會正常觸發
       - name: Check for failures
         if: always()
         run: |
-          if [ "${{ steps.shioaji.outcome }}" = "failure" ] || \
-             [ "${{ steps.schwab.outcome }}" = "failure" ] || \
-             [ "${{ steps.calendar.outcome }}" = "failure" ] || \
+          if [ "${{ steps.calendar.outcome }}" = "failure" ] || \
              [ "${{ steps.quotes.outcome }}" = "failure" ] || \
              [ "${{ steps.symbols.outcome }}" = "failure" ] || \
-             [ "${{ steps.fx.outcome }}" = "failure" ] || \
-             [ "${{ steps.reminders.outcome }}" = "failure" ]; then
-            echo "至少一支同步腳本失敗，詳見上方對應步驟的 log"
+             [ "${{ steps.fx.outcome }}" = "failure" ]; then
+            echo "至少一支共用資料同步腳本失敗，詳見上方對應步驟的 log"
             exit 1
           fi

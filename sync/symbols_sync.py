@@ -64,15 +64,17 @@ def main():
         print(json.dumps(symbols[:5], ensure_ascii=False, indent=2))
         return
 
-    from firestore_client import init_firestore, set_sync_meta, symbol_key
+    from firestore_client import init_firestore, scan_all_users, set_sync_meta_all, symbol_key
 
     db = init_firestore()
     try:
         wanted = None
         if args.only_held:
+            # 名稱是共用資料，要涵蓋所有使用者持有的代號，
+            # 不然另一個人的部位只會顯示代號、沒有中文名稱
             wanted = set()
             for coll in ("positions", "lots", "realized", "trades"):
-                for doc in db.collection(coll).stream():
+                for doc in scan_all_users(db, coll):
                     d = doc.to_dict()
                     if d.get("market") == MARKET and d.get("symbol"):
                         wanted.add(d["symbol"])
@@ -96,9 +98,9 @@ def main():
             batch.commit()
 
         print(f"[symbols_sync] 寫入 {written} 筆代號名稱" + (f"（只寫持有中的 {len(wanted)} 檔）" if wanted is not None else ""))
-        set_sync_meta(db, BROKER, True, None)
+        set_sync_meta_all(db, BROKER, True, None)
     except Exception as exc:
-        set_sync_meta(db, BROKER, False, f"{type(exc).__name__}: {exc}")
+        set_sync_meta_all(db, BROKER, False, f"{type(exc).__name__}: {exc}")
         raise
 
 

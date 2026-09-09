@@ -66,15 +66,21 @@ def fetch_finnhub(symbol: str, api_key: str):
 
 
 def collect_us_symbols(db):
-    # 使用者刪掉整檔後會列進忽略清單，就不用再為它抓現價
-    settings = db.collection("settings").document("import").get()
-    ignored = set((settings.to_dict() or {}).get("ignoredSymbols", []) if settings.exists else [])
+    """現價是共用資料，要涵蓋所有使用者的持股，不然另一個人的部位會顯示未估值。
+
+    忽略清單是各自的：A 刪掉某一檔，不該讓還持有它的 B 也沒有現價可用。
+    所以只有「所有人都忽略」的代號才真的跳過。
+    """
+    from firestore_client import all_user_roots
 
     symbols = set()
-    for doc in db.collection("trades").stream():
-        d = doc.to_dict()
-        if d.get("market") == MARKET and d.get("symbol") and d["symbol"] not in ignored:
-            symbols.add(d["symbol"])
+    for root in all_user_roots(db):
+        settings = root.collection("settings").document("import").get()
+        ignored = set((settings.to_dict() or {}).get("ignoredSymbols", []) if settings.exists else [])
+        for doc in root.collection("trades").stream():
+            d = doc.to_dict()
+            if d.get("market") == MARKET and d.get("symbol") and d["symbol"] not in ignored:
+                symbols.add(d["symbol"])
     return sorted(symbols)
 
 
@@ -92,7 +98,7 @@ def main():
                 print(f"  {s}: 失敗 {type(exc).__name__}")
         return
 
-    from firestore_client import init_firestore, set_sync_meta, upsert_quote
+    from firestore_client import init_firestore, set_sync_meta_all, upsert_quote
 
     db = init_firestore()
     try:
@@ -126,9 +132,9 @@ def main():
         if failed:
             # 抓不到就讓前端顯示「未估值」，不要拿舊價充數
             print(f"[quotes_sync] 抓不到現價（維持未估值）: {', '.join(failed)}")
-        set_sync_meta(db, BROKER, True, None)
+        set_sync_meta_all(db, BROKER, True, None)
     except Exception as exc:
-        set_sync_meta(db, BROKER, False, f"{type(exc).__name__}: {exc}")
+        set_sync_meta_all(db, BROKER, False, f"{type(exc).__name__}: {exc}")
         raise
 
 

@@ -2,6 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/fireba
 import {
   getAuth,
   signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
@@ -10,17 +11,40 @@ import {
   persistentLocalCache,
   collection,
   doc,
+  getDoc,
   onSnapshot,
   setDoc,
   updateDoc,
   deleteDoc,
   writeBatch,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
-import { firebaseConfig } from "./firebase-config.js";
+import { firebaseConfig, OWNER_UID } from "./firebase-config.js";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = initializeFirestore(app, { localCache: persistentLocalCache() });
+
+/* ---------- 資料位置 ---------- */
+
+// 登入中的使用者。allowed 是「有沒有被開通」：註冊是開放的，能登入不等於能用。
+const session = { uid: null, email: null, allowed: false, owner: false };
+
+// 個人資料放在 users/{uid}/ 底下，兩個帳號彼此讀不到（規則見 firestore.rules）。
+// 這兩個 helper 只能在登入後呼叫，session.uid 是空的時候路徑會是錯的，
+// 所以刻意讓它直接壞掉而不是預設成某個人的資料。
+function myCol(name) {
+  if (!session.uid) throw new Error("尚未登入，不能存取個人資料");
+  return collection(db, "users", session.uid, name);
+}
+function myDoc(name, id) {
+  if (!session.uid) throw new Error("尚未登入，不能存取個人資料");
+  return doc(db, "users", session.uid, name, id);
+}
+
+// 現價、代號名稱、匯率、除權息與財報日是市場資料不是個人資料，
+// 開通的使用者共用同一份：省 API 額度，也不用為兩個人重複抓同一檔。
+const sharedCol = (name) => collection(db, name);
+const sharedDoc = (name, id) => doc(db, name, id);
 
 const state = {
   positions: [],
@@ -35,6 +59,7 @@ const state = {
   quotes: {},
   fx: {},
   syncMeta: [],
+  allowlist: [],
   ready: false,
 };
 
@@ -604,30 +629,50 @@ function normalizeFx(id, d) {
   };
 }
 
+// 換帳號時舊的監聽還掛在前一個人的路徑上，不取消掉會一直噴 permission-denied，
+// 而且前一個人的資料會殘留在畫面上。登出時一律全部收掉並清空 state。
+let unsubs = [];
+
+function unsubscribeAll() {
+  for (const stop of unsubs) {
+    try {
+      stop();
+    } catch {
+      /* 已經斷線的監聽再取消一次不影響 */
+    }
+  }
+  unsubs = [];
+  Object.assign(state, {
+    positions: [], realized: [], lots: [], trades: [], dividends: [], options: [],
+    symbols: {}, settings: {}, events: [], quotes: {}, fx: {}, syncMeta: [],
+    allowlist: [], ready: false,
+  });
+}
+
 function subscribe() {
-  onSnapshot(collection(db, "positions"), (snap) => {
+  unsubs.push(onSnapshot(myCol("positions"), (snap) => {
     state.positions = snap.docs.map((d) => normalizePosition(d.id, d.data()));
     render();
-  });
+  }));
 
-  onSnapshot(collection(db, "realized"), (snap) => {
+  unsubs.push(onSnapshot(myCol("realized"), (snap) => {
     state.realized = snap.docs.map((d) => normalizeRealized(d.id, d.data()));
     state.realized.sort((a, b) => b.sellDate - a.sellDate);
     render();
-  });
+  }));
 
-  onSnapshot(collection(db, "lots"), (snap) => {
+  unsubs.push(onSnapshot(myCol("lots"), (snap) => {
     state.lots = snap.docs.map((d) => normalizeLot(d.id, d.data()));
     state.lots.sort((a, b) => b.tradeDate - a.tradeDate);
     render();
-  });
+  }));
 
-  onSnapshot(doc(db, "settings", "import"), (snap) => {
+  unsubs.push(onSnapshot(myDoc("settings", "import"), (snap) => {
     state.settings = snap.exists() ? snap.data() : {};
     render();
-  });
+  }));
 
-  onSnapshot(collection(db, "symbols"), (snap) => {
+  unsubs.push(onSnapshot(sharedCol("symbols"), (snap) => {
     const map = {};
     for (const d of snap.docs) {
       const v = d.data();
@@ -635,21 +680,21 @@ function subscribe() {
     }
     state.symbols = map;
     render();
-  });
+  }));
 
-  onSnapshot(collection(db, "options"), (snap) => {
+  unsubs.push(onSnapshot(myCol("options"), (snap) => {
     state.options = snap.docs.map((d) => normalizeOption(d.id, d.data()));
     state.options.sort((a, b) => (b.openDate || "").localeCompare(a.openDate || ""));
     render();
-  });
+  }));
 
-  onSnapshot(collection(db, "trades"), (snap) => {
+  unsubs.push(onSnapshot(myCol("trades"), (snap) => {
     state.trades = snap.docs.map((d) => normalizeTrade(d.id, d.data()));
     state.trades.sort((a, b) => b.tradeDate - a.tradeDate);
     render();
-  });
+  }));
 
-  onSnapshot(collection(db, "dividends"), (snap) => {
+  unsubs.push(onSnapshot(myCol("dividends"), (snap) => {
     state.dividends = snap.docs.map((d) => {
       const v = d.data();
       return {
@@ -665,9 +710,9 @@ function subscribe() {
     });
     state.dividends.sort((a, b) => b.payDate - a.payDate);
     render();
-  });
+  }));
 
-  onSnapshot(collection(db, "calendarEvents"), (snap) => {
+  unsubs.push(onSnapshot(sharedCol("calendarEvents"), (snap) => {
     state.events = snap.docs.map((d) => {
       const v = d.data();
       return {
@@ -681,9 +726,9 @@ function subscribe() {
     });
     state.events.sort((a, b) => a.eventDate - b.eventDate);
     render();
-  });
+  }));
 
-  onSnapshot(collection(db, "quotes"), (snap) => {
+  unsubs.push(onSnapshot(sharedCol("quotes"), (snap) => {
     const q = {};
     for (const d of snap.docs) {
       const v = d.data();
@@ -691,16 +736,24 @@ function subscribe() {
     }
     state.quotes = q;
     render();
-  });
+  }));
 
-  onSnapshot(collection(db, "fx"), (snap) => {
+  unsubs.push(onSnapshot(sharedCol("fx"), (snap) => {
     const fx = {};
     for (const d of snap.docs) fx[d.id] = normalizeFx(d.id, d.data());
     state.fx = fx;
     render();
-  });
+  }));
 
-  onSnapshot(collection(db, "syncMeta"), (snap) => {
+  // 開通名單只有擁有者讀得到，其他人訂閱會被規則拒絕，所以不要無條件掛上去
+  if (session.owner) {
+    unsubs.push(onSnapshot(sharedCol("allowlist"), (snap) => {
+      state.allowlist = snap.docs.map((d) => ({ email: d.id, ...d.data() }));
+      render();
+    }));
+  }
+
+  unsubs.push(onSnapshot(myCol("syncMeta"), (snap) => {
     state.syncMeta = snap.docs.map((d) => ({
       id: d.id,
       lastSyncAt: parseDate(d.data().lastSyncAt),
@@ -708,24 +761,24 @@ function subscribe() {
       lastError: d.data().lastError || "",
     }));
     renderSyncBadge();
-  });
+  }));
 }
 
 async function saveQuote(market, symbol, price) {
   await setDoc(
-    doc(db, "quotes", symbolKey(market, symbol)),
+    sharedDoc("quotes", symbolKey(market, symbol)),
     { symbol, market, price, updatedAt: new Date().toISOString() },
     { merge: true }
   );
 }
 
 async function saveTradeNote(id, note) {
-  await updateDoc(doc(db, "trades", id), { note });
+  await updateDoc(myDoc("trades", id), { note });
 }
 
 async function addManualTrade(data) {
   const id = `manual_${Date.now()}`;
-  await setDoc(doc(db, "trades", id), {
+  await setDoc(myDoc("trades", id), {
     ...data,
     broker: "manual",
     externalId: id,
@@ -734,7 +787,7 @@ async function addManualTrade(data) {
 }
 
 async function deleteTrade(id) {
-  await deleteDoc(doc(db, "trades", id));
+  await deleteDoc(myDoc("trades", id));
 }
 
 /* ---------- 刪除交易紀錄 ---------- */
@@ -743,7 +796,7 @@ async function deleteTrade(id) {
 // 所以整檔刪除時把代號寫進忽略清單，匯入與抓現價都會跳過它，刪除才是持久的。
 async function setIgnoredSymbols(symbols) {
   await setDoc(
-    doc(db, "settings", "import"),
+    myDoc("settings", "import"),
     { ignoredSymbols: symbols, updatedAt: new Date().toISOString() },
     { merge: true }
   );
@@ -755,23 +808,23 @@ function relatedDocRefs(symbols, market) {
   const set = new Set(symbols);
   const refs = [];
   for (const t of state.trades) {
-    if (set.has(t.symbol) && t.market === market) refs.push(doc(db, "trades", t.id));
+    if (set.has(t.symbol) && t.market === market) refs.push(myDoc("trades", t.id));
   }
   for (const d of state.dividends) {
-    if (set.has(d.symbol) && d.market === market) refs.push(doc(db, "dividends", d.id));
+    if (set.has(d.symbol) && d.market === market) refs.push(myDoc("dividends", d.id));
   }
   for (const l of state.lots) {
-    if (set.has(l.symbol) && l.market === market) refs.push(doc(db, "lots", l.id));
+    if (set.has(l.symbol) && l.market === market) refs.push(myDoc("lots", l.id));
   }
   for (const r of state.realized) {
-    if (set.has(r.symbol) && r.market === market) refs.push(doc(db, "realized", r.id));
+    if (set.has(r.symbol) && r.market === market) refs.push(myDoc("realized", r.id));
   }
   for (const o of state.options) {
-    if (set.has(o.underlying) && o.market === market) refs.push(doc(db, "options", o.id));
+    if (set.has(o.underlying) && o.market === market) refs.push(myDoc("options", o.id));
   }
   for (const sym of set) {
-    refs.push(doc(db, "quotes", symbolKey(market, sym)));
-    refs.push(doc(db, "symbols", symbolKey(market, sym)));
+    refs.push(sharedDoc("quotes", symbolKey(market, sym)));
+    refs.push(sharedDoc("symbols", symbolKey(market, sym)));
   }
   return refs;
 }
@@ -1037,20 +1090,20 @@ async function importSchwab(parsed, onProgress) {
   for (const t of parsed.trades) {
     const { action, ...data } = t;
     // note 是使用者自己寫的，重新匯入不可覆寫，所以不放進 payload
-    writes.push({ ref: doc(db, "trades", `schwab_${t.externalId}`), data: { ...data, syncedAt } });
+    writes.push({ ref: myDoc("trades", `schwab_${t.externalId}`), data: { ...data, syncedAt } });
   }
   for (const d of parsed.dividends) {
     const { action, ...data } = d;
-    writes.push({ ref: doc(db, "dividends", `schwab_${d.externalId}`), data: { ...data, syncedAt } });
+    writes.push({ ref: myDoc("dividends", `schwab_${d.externalId}`), data: { ...data, syncedAt } });
   }
   for (const o of parsed.options) {
     const { id, staleOpen, ...data } = o;
-    writes.push({ ref: doc(db, "options", id), data: { ...data, syncedAt } });
+    writes.push({ ref: myDoc("options", id), data: { ...data, syncedAt } });
   }
   // 匯出檔的 Description 就是公司名稱，順便存起來讓介面顯示「Tesla Inc TSLA」
   for (const [symbol, name] of Object.entries(parsed.names)) {
     writes.push({
-      ref: doc(db, "symbols", symbolKey("US", symbol)),
+      ref: sharedDoc("symbols", symbolKey("US", symbol)),
       data: { symbol, market: "US", name, source: "schwab", updatedAt: syncedAt },
     });
   }
@@ -1923,7 +1976,7 @@ function deleteFilteredPanel(filtered, query) {
       try {
         const refs = wholeSymbol
           ? relatedDocRefs(symbols, markets[0])
-          : filtered.filter((t) => t.kind === "trade").map((t) => doc(db, "trades", t.id));
+          : filtered.filter((t) => t.kind === "trade").map((t) => myDoc("trades", t.id));
         const n = await deleteDocsInBatches(refs, (d, total) => {
           status.textContent = `刪除中… ${d} / ${total}`;
         });
@@ -1952,6 +2005,91 @@ function deleteFilteredPanel(filtered, query) {
     status,
   ]);
 }
+
+/* ---------- 設定（開通名單） ---------- */
+
+// 註冊是開放的，所以「誰能用」要另外管。這一頁只有擁有者看得到，
+// 判斷在 firestore.rules，前端這層只是把結果畫出來。
+function viewSettings() {
+  if (!session.owner) {
+    return el("div", { class: "blankslate", text: "這一頁只有擁有者能開。" });
+  }
+
+  const status = el("div", { class: "row-sub", style: "margin-top:8px" });
+  const input = el("input", { type: "email", placeholder: "her@example.com", id: "allowEmail" });
+
+  const addBtn = el("button", {
+    class: "btn btn-sm btn-primary",
+    text: "加入名單",
+    onclick: async () => {
+      const email = input.value.trim().toLowerCase();
+      if (!email) return;
+      addBtn.disabled = true;
+      try {
+        await setDoc(sharedDoc("allowlist", email), {
+          addedAt: new Date().toISOString(),
+          addedBy: session.email,
+        });
+        status.textContent = `已加入 ${email}，她現在可以自己註冊了。`;
+        input.value = "";
+      } catch (err) {
+        status.textContent = `加入失敗：${err.message}`;
+      }
+      addBtn.disabled = false;
+    },
+  });
+
+  const rows = state.allowlist.length
+    ? state.allowlist.map((entry) =>
+        el("div", { class: "row" }, [
+          el("div", { class: "row-main" }, [
+            el("div", { class: "mono", text: entry.email }),
+            el("div", { class: "row-sub", text: entry.addedAt ? `加入於 ${entry.addedAt.slice(0, 10)}` : "" }),
+          ]),
+          entry.email === session.email
+            ? el("span", { class: "row-sub", text: "你自己" })
+            : el("button", {
+                class: "btn btn-sm btn-danger",
+                text: "移除",
+                onclick: async () => {
+                  if (!confirm(`移除 ${entry.email}？她會立刻無法讀取自己的資料，但資料本身不會被刪除。`)) return;
+                  try {
+                    await deleteDoc(sharedDoc("allowlist", entry.email));
+                    status.textContent = `已移除 ${entry.email}。`;
+                  } catch (err) {
+                    status.textContent = `移除失敗：${err.message}`;
+                  }
+                },
+              }),
+        ])
+      )
+    : [el("div", { class: "blankslate", text: "名單是空的，只有你自己能用。" })];
+
+  return el("div", {}, [
+    el("div", { class: "box" }, [
+      el("div", { class: "box-header", text: "開通名單" }),
+      el("div", { class: "box-body" }, [
+        el("div", { class: "row-sub" }, [
+          "任何人都能在登入頁註冊帳號，但只有名單上的 Email 讀寫得到資料，其他人登入後會看到「尚未開通」。",
+        ]),
+        el("div", { class: "row-sub", style: "margin-top:6px" }, [
+          "先把她的 Email 加進來，她再自己註冊、自己設密碼，你不會經手她的密碼。每個人的交易資料各自獨立，你們互相看不到對方的。",
+        ]),
+        el("div", { class: "field", style: "margin-top:12px" }, [
+          el("label", { text: "Email" }),
+          input,
+        ]),
+        el("div", { style: "margin-top:8px" }, [addBtn]),
+        status,
+      ]),
+    ]),
+    el("div", { class: "box", style: "margin-top:12px" }, [
+      el("div", { class: "box-header", text: `目前名單（${state.allowlist.length}）` }),
+      ...rows,
+    ]),
+  ]);
+}
+
 
 function toggleTradeForm() {
   const f = document.getElementById("tradeForm");
@@ -2770,6 +2908,7 @@ const ROUTES = {
   "/dividends": viewDividends,
   "/reminders": viewReminders,
   "/report": viewReport,
+  "/settings": viewSettings,
 };
 
 // 手動交易頁已併進交易紀錄，舊的 #/trades 連結與書籤繼續有效
@@ -2843,44 +2982,131 @@ const AUTH_ERRORS = {
   "auth/invalid-credential": "帳號或密碼錯誤",
   "auth/wrong-password": "帳號或密碼錯誤",
   "auth/user-not-found": "找不到這個帳號",
+  "auth/email-already-in-use": "這個 Email 已經註冊過了，改用登入即可",
+  "auth/weak-password": "密碼至少要 6 個字",
   "auth/too-many-requests": "嘗試次數過多，稍後再試",
   "auth/network-request-failed": "網路連線失敗",
   "auth/operation-not-allowed": "Firebase 尚未啟用 Email/密碼登入",
 };
 
+// 註冊是開放的，任何人都能建 Firebase 帳號，所以「登入成功」不等於「可以用」。
+// 真正的授權是 email 有沒有被列進 allowlist，而且判斷在 firestore.rules：
+// 這個函式只是把結果反映到畫面上，改前端不會讓任何人多拿到一分權限。
+async function checkAllowed(user) {
+  // 擁有者永遠通過，不然名單被自己清空就沒人能再加人了
+  if (user.uid === OWNER_UID) return true;
+  if (!user.email) return false;
+  try {
+    const snap = await getDoc(sharedDoc("allowlist", user.email.toLowerCase()));
+    return snap.exists();
+  } catch {
+    // 規則拒絕讀取時一樣當成沒開通
+    return false;
+  }
+}
+
+// 同步腳本從 users 集合列出所有使用者，才知道要幫誰抓現價與代號名稱。
+// 沒有這份 document，她的持股就不會被共用的行情同步涵蓋到。
+async function ensureProfile(user) {
+  try {
+    await setDoc(
+      doc(db, "users", user.uid),
+      { email: user.email, lastSeenAt: new Date().toISOString() },
+      { merge: true }
+    );
+  } catch {
+    /* 寫不進去不影響瀏覽自己的資料，下次登入再試 */
+  }
+}
+
 function initAuth() {
   const gate = document.getElementById("authGate");
   const form = document.getElementById("authForm");
   const errorBox = document.getElementById("authError");
+  const submitBtn = document.getElementById("authSubmit");
+  const modeBtn = document.getElementById("authModeBtn");
+  const modeHint = document.getElementById("authModeHint");
+  const pendingBox = document.getElementById("authPending");
+  const pendingEmail = document.getElementById("authPendingEmail");
+  const settingsTab = document.querySelector('[data-route="/settings"]');
+
+  let mode = "signin";
+
+  function applyMode() {
+    const signup = mode === "signup";
+    submitBtn.textContent = signup ? "註冊" : "登入";
+    modeBtn.textContent = signup ? "已經有帳號了？改用登入" : "第一次使用？註冊帳號";
+    modeHint.textContent = signup
+      ? "密碼至少 6 個字。註冊完如果看到「尚未開通」，請擁有者把你的 Email 加進開通名單。"
+      : "";
+    document.getElementById("authPassword").autocomplete = signup ? "new-password" : "current-password";
+    errorBox.classList.add("hidden");
+  }
+
+  modeBtn.addEventListener("click", () => {
+    mode = mode === "signup" ? "signin" : "signup";
+    applyMode();
+  });
+  applyMode();
 
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     errorBox.classList.add("hidden");
+    submitBtn.disabled = true;
     const email = document.getElementById("authEmail").value.trim();
     const password = document.getElementById("authPassword").value;
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      if (mode === "signup") {
+        await createUserWithEmailAndPassword(auth, email, password);
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
     } catch (err) {
-      errorBox.textContent = AUTH_ERRORS[err.code] || `登入失敗：${err.code || err.message}`;
+      errorBox.textContent = AUTH_ERRORS[err.code] || `${mode === "signup" ? "註冊" : "登入"}失敗：${err.code || err.message}`;
       errorBox.classList.remove("hidden");
     }
+    submitBtn.disabled = false;
   });
 
-  document.getElementById("signOutBtn").addEventListener("click", () => signOut(auth));
+  for (const id of ["signOutBtn", "authPendingSignOut"]) {
+    document.getElementById(id).addEventListener("click", () => signOut(auth));
+  }
 
-  onAuthStateChanged(auth, (user) => {
-    const signedIn = !!user;
-    gate.classList.toggle("hidden", signedIn);
-    document.getElementById("appHeader").classList.toggle("hidden", !signedIn);
-    document.getElementById("tabnav").classList.toggle("hidden", !signedIn);
-    document.getElementById("view").classList.toggle("hidden", !signedIn);
-    if (signedIn && !state.ready) {
+  onAuthStateChanged(auth, async (user) => {
+    // 換帳號時先把前一個人的監聽全部收掉並清空 state，
+    // 不然舊監聽會掛在別人的路徑上一直噴 permission-denied，資料也會殘留在畫面上
+    unsubscribeAll();
+    session.uid = user ? user.uid : null;
+    session.email = user ? user.email : null;
+    session.owner = !!user && user.uid === OWNER_UID;
+    session.allowed = user ? await checkAllowed(user) : false;
+
+    // 登入流程是非同步的，等 await 回來時使用者可能已經登出或換人，
+    // 這時候這一輪的結果就過期了，不能拿去改畫面
+    if (auth.currentUser !== user) return;
+
+    const active = !!user && session.allowed;
+    gate.classList.toggle("hidden", !!user);
+    pendingBox.classList.toggle("hidden", !user || session.allowed);
+    document.getElementById("appHeader").classList.toggle("hidden", !active);
+    document.getElementById("tabnav").classList.toggle("hidden", !active);
+    document.getElementById("view").classList.toggle("hidden", !active);
+    if (settingsTab) settingsTab.classList.toggle("hidden", !session.owner);
+
+    if (user && !session.allowed) {
+      pendingEmail.textContent = user.email || "";
+    }
+
+    if (active) {
       state.ready = true;
+      ensureProfile(user);
       subscribe();
       render();
     }
-    if (!signedIn) {
+    if (!user) {
       document.getElementById("authPassword").value = "";
+      mode = "signin";
+      applyMode();
     }
   });
 }

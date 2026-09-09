@@ -64,14 +64,54 @@
                   required
                 />
               </div>
-              <button type="submit" class="btn btn-primary" style="width: 100%">
+              <button
+                type="submit"
+                class="btn btn-primary"
+                id="authSubmit"
+                style="width: 100%"
+              >
                 登入
               </button>
             </form>
+            <button
+              type="button"
+              class="btn"
+              id="authModeBtn"
+              style="width: 100%; margin-top: 8px"
+            >
+              第一次使用？註冊帳號
+            </button>
+            <div class="row-sub" id="authModeHint" style="margin-top: 8px"></div>
           </div>
         </div>
         <div class="blankslate" style="padding: 12px; font-size: 12px">
-          單一使用者專用，帳號在 Firebase Console 建立
+          每個帳號的交易資料各自獨立，彼此看不到對方的紀錄
+        </div>
+      </div>
+    </div>
+
+    <!-- 註冊開放，任何人都能建帳號，但 Email 沒被列進開通名單就讀寫不到任何資料 -->
+    <div class="auth-gate hidden" id="authPending">
+      <div class="auth-card">
+        <div class="box">
+          <div class="box-header">尚未開通</div>
+          <div class="box-body">
+            <div class="row-sub">
+              <span id="authPendingEmail" class="mono"></span>
+              這個帳號已經建立好了，但還沒有被加入開通名單，所以讀不到任何資料。
+            </div>
+            <div class="row-sub" style="margin-top: 8px">
+              請這個 App 的擁有者到「設定」頁把你的 Email 加進名單，加完重新登入即可。
+            </div>
+            <button
+              type="button"
+              class="btn"
+              id="authPendingSignOut"
+              style="width: 100%; margin-top: 12px"
+            >
+              登出
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -114,6 +154,7 @@
       <a href="#/dividends" data-route="/dividends">股利</a>
       <a href="#/reminders" data-route="/reminders">提醒</a>
       <a href="#/report" data-route="/report">報表</a>
+      <a href="#/settings" data-route="/settings" class="hidden">設定</a>
     </nav>
 
     <main id="view" class="hidden"></main>

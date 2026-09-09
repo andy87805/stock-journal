@@ -61,7 +61,7 @@ def main():
         print(json.dumps(build_fx(), ensure_ascii=False, indent=2))
         return
 
-    from firestore_client import init_firestore, set_sync_meta
+    from firestore_client import init_firestore, set_sync_meta_all
 
     db = init_firestore()
     try:
@@ -69,9 +69,9 @@ def main():
             doc_id = f"{record['base']}{record['quote']}"
             db.collection("fx").document(doc_id).set(record)
             print(f"[fx_sync] {doc_id} = {record['rate']}")
-        set_sync_meta(db, BROKER, True, None)
+        set_sync_meta_all(db, BROKER, True, None)
     except Exception as exc:
-        set_sync_meta(db, BROKER, False, f"{type(exc).__name__}: {exc}")
+        set_sync_meta_all(db, BROKER, False, f"{type(exc).__name__}: {exc}")
         raise
 
 

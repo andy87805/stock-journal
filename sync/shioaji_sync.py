@@ -373,6 +373,7 @@ def main():
         upsert_closed_lot,
         upsert_quote,
         upsert_realized,
+        user_root,
     )
 
     api_key = os.environ.get("SHIOAJI_API_KEY")
@@ -381,6 +382,9 @@ def main():
         raise SystemExit("需要 SHIOAJI_API_KEY / SHIOAJI_API_SECRET")
 
     db = init_firestore()
+    # 個人資料（庫存/批次/已實現/同步狀態）寫進 users/{uid}/；
+    # 現價是市場資料，留在最上層共用。
+    root = user_root(db)
 
     try:
         import shioaji as sj
@@ -397,18 +401,18 @@ def main():
         positions, quotes, open_lots = build_positions(api, account)
         realized, closed_lots = build_realized(api, account, begin, end)
 
-        written, stale = replace_positions(db, BROKER, positions)
+        written, stale = replace_positions(root, BROKER, positions)
         print(f"[shioaji_sync] 庫存 {written} 檔（清掉 {stale} 筆已不存在）")
 
         for record in realized:
-            upsert_realized(db, BROKER, record)
+            upsert_realized(root, BROKER, record)
         print(f"[shioaji_sync] 已實現損益 {len(realized)} 筆（{begin} ~ {end}）")
 
-        lots_written, lots_stale = replace_open_lots(db, BROKER, open_lots)
+        lots_written, lots_stale = replace_open_lots(root, BROKER, open_lots)
         print(f"[shioaji_sync] 持有中買進批次 {lots_written} 筆（清掉 {lots_stale} 筆已不存在）")
 
         for lot in closed_lots:
-            upsert_closed_lot(db, BROKER, lot)
+            upsert_closed_lot(root, BROKER, lot)
         print(f"[shioaji_sync] 已平倉的進場批次 {len(closed_lots)} 筆")
 
         for quote in quotes:
@@ -419,7 +423,7 @@ def main():
         if no_entry:
             print(f"[shioaji_sync] 這些平倉紀錄拿不到進場日，持有天數留空: {', '.join(no_entry)}")
 
-        set_sync_meta(db, BROKER, True, None)
+        set_sync_meta(root, BROKER, True, None)
 
         try:
             api.logout()
@@ -428,7 +432,7 @@ def main():
             pass
 
     except Exception as exc:
-        set_sync_meta(db, BROKER, False, f"{type(exc).__name__}: {exc}")
+        set_sync_meta(root, BROKER, False, f"{type(exc).__name__}: {exc}")
         raise
 
 

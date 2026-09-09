@@ -181,7 +181,7 @@ def main():
         )
         return
 
-    from firestore_client import init_firestore, set_sync_meta, upsert_dividend, upsert_trade
+    from firestore_client import init_firestore, set_sync_meta, upsert_dividend, upsert_trade, user_root
 
     client_id = os.environ.get("SCHWAB_CLIENT_ID")
     client_secret = os.environ.get("SCHWAB_CLIENT_SECRET")
@@ -190,6 +190,7 @@ def main():
         raise RuntimeError("缺少 SCHWAB_CLIENT_ID / SCHWAB_CLIENT_SECRET / SCHWAB_REFRESH_TOKEN 環境變數")
 
     db = init_firestore()
+    root = user_root(db)
     try:
         access_token = refresh_access_token(client_id, client_secret, refresh_token)
         account_hash = get_account_hash(access_token)
@@ -197,14 +198,14 @@ def main():
         trades, dividends = map_transactions(raw_transactions)
 
         for trade in trades:
-            upsert_trade(db, trade)
+            upsert_trade(root, trade)
         for dividend in dividends:
-            upsert_dividend(db, dividend)
+            upsert_dividend(root, dividend)
 
-        set_sync_meta(db, BROKER, True, None)
+        set_sync_meta(root, BROKER, True, None)
         print(f"[schwab_sync] 同步完成，共 {len(trades)} 筆交易、{len(dividends)} 筆股利")
     except Exception as e:
-        set_sync_meta(db, BROKER, False, str(e))
+        set_sync_meta(root, BROKER, False, str(e))
         raise
 
 

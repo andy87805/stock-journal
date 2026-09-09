@@ -1,6 +1,17 @@
 """
 共用 Firestore 存取層。broker 同步腳本 (shioaji_sync.py / schwab_sync.py / calendar_sync.py)
 都透過這裡的函式寫入資料，確保 document ID 產生規則與 SCHEMA.md 一致。
+
+資料分成兩種，函式的第一個參數會標明是哪一種：
+
+  root  個人資料，放在 users/{uid}/ 底下（交易、庫存、批次、已實現、股利、
+        設定、同步狀態）。用 user_root() 取得。
+  db    共用的行情資料，放在最上層（現價、代號名稱、匯率、除權息與財報日）。
+        市場資料不是個人資料，兩個人共用同一份可以省 API 額度。
+
+Firestore 的 DocumentReference 跟 Client 一樣有 .collection()，所以把 db 換成
+users/{uid} 這個 DocumentReference 之後，下面的寫入邏輯一行都不用改，
+只是寫進子集合而不是最上層。
 """
 import base64
 import binascii
@@ -74,24 +85,71 @@ def init_firestore():
     return firestore.client()
 
 
-def upsert_trade(db, trade: dict):
+def user_root(db, uid: str | None = None):
+    """回傳某個使用者的資料根節點 users/{uid}。
+
+    同步腳本用環境變數 SYNC_USER_UID 決定這次要同步誰。UID 在
+    Firebase Console → Authentication → Users 那一欄。
+    寧可直接失敗也不要預設成某個人：預設值會讓 workflow 設定漏掉時，
+    把 A 的券商資料靜靜寫進 B 的帳號底下，而且畫面上看起來完全正常。
+    """
+    uid = uid or os.environ.get("SYNC_USER_UID", "").strip()
+    if not uid:
+        raise SystemExit(
+            "沒有設定 SYNC_USER_UID，不知道這次要把資料同步到誰的帳號底下。\n"
+            "UID 在 Firebase Console → Authentication → Users 那一欄，"
+            "在 GitHub Actions 上由 workflow 的 matrix 帶入。"
+        )
+    return db.collection("users").document(uid)
+
+
+def all_user_roots(db):
+    """所有使用者的資料根節點。
+
+    現價、代號名稱、除權息日這些共用資料要涵蓋每個人的持股，只掃自己的
+    會讓另一個人的部位沒有現價可用。list_documents() 而不是 stream()：
+    users/{uid} 這份 document 本身可能沒有欄位、只有子集合，那種情況
+    stream() 不會回傳它。
+    """
+    return list(db.collection("users").list_documents())
+
+
+def scan_all_users(db, collection_name: str):
+    """逐一產出每個使用者同一個子集合裡的文件。
+
+    共用資料（現價、代號名稱、除權息與財報日）要涵蓋所有人的持股：
+    只掃自己的，另一個人的部位就會沒有現價、只顯示代號沒有名稱。
+    """
+    for root in all_user_roots(db):
+        for doc in root.collection(collection_name).stream():
+            yield doc
+
+
+def set_sync_meta_all(db, broker: str, success: bool, error: str | None):
+    """共用資料的同步一次服務所有人，狀態就寫進每個人的 syncMeta，兩邊都看得到。"""
+    for root in all_user_roots(db):
+        set_sync_meta(root, broker, success, error)
+
+
+def upsert_trade(root, trade: dict):
     doc_id = f"{trade['broker']}_{trade['externalId']}"
     # note 是使用者在 App 端手動填寫的筆記，同步腳本一律不寫入/不覆寫這個欄位。
     data = {k: v for k, v in trade.items() if k != "note"}
     data["syncedAt"] = _now_iso()
-    db.collection("trades").document(doc_id).set(data, merge=True)
+    root.collection("trades").document(doc_id).set(data, merge=True)
     return doc_id
 
 
-def upsert_dividend(db, dividend: dict):
+def upsert_dividend(root, dividend: dict):
     doc_id = f"{dividend['broker']}_{dividend['externalId']}"
     data = dict(dividend)
     data["syncedAt"] = _now_iso()
-    db.collection("dividends").document(doc_id).set(data, merge=True)
+    root.collection("dividends").document(doc_id).set(data, merge=True)
     return doc_id
 
 
 def upsert_calendar_event(db, event: dict):
+    """除權息日與財報日是公開的市場行事曆，放最上層共用。"""
     date_only = event["eventDate"][:10]
     doc_id = f"{event['symbol']}_{event['type']}_{date_only}"
     data = dict(event)
@@ -99,7 +157,7 @@ def upsert_calendar_event(db, event: dict):
     return doc_id
 
 
-def replace_positions(db, broker: str, positions: list[dict]):
+def replace_positions(root, broker: str, positions: list[dict]):
     """整批覆蓋某個 broker 的庫存。
 
     庫存是「當下狀態」而不是歷史紀錄：賣光的部位必須從 Firestore 消失，
@@ -111,11 +169,11 @@ def replace_positions(db, broker: str, positions: list[dict]):
         data = dict(pos)
         data["broker"] = broker
         data["syncedAt"] = _now_iso()
-        db.collection("positions").document(doc_id).set(data)
+        root.collection("positions").document(doc_id).set(data)
         written.add(doc_id)
 
     stale = 0
-    for doc in db.collection("positions").where(filter=FieldFilter("broker", "==", broker)).stream():
+    for doc in root.collection("positions").where(filter=FieldFilter("broker", "==", broker)).stream():
         if doc.id not in written:
             doc.reference.delete()
             stale += 1
@@ -134,7 +192,7 @@ def _lot_doc_id(broker: str, lot: dict):
     return f"{broker}_{lot['status']}_{lot['symbol']}_{lot['tradeDate']}_{key}"
 
 
-def replace_open_lots(db, broker: str, lots: list[dict]):
+def replace_open_lots(root, broker: str, lots: list[dict]):
     """整批覆蓋仍持有的買進批次（賣掉了就該從清單消失）。closed 的批次不動。"""
     written = set()
     for lot in lots:
@@ -142,12 +200,12 @@ def replace_open_lots(db, broker: str, lots: list[dict]):
         data = dict(lot)
         data["broker"] = broker
         data["syncedAt"] = _now_iso()
-        db.collection("lots").document(doc_id).set(data)
+        root.collection("lots").document(doc_id).set(data)
         written.add(doc_id)
 
     stale = 0
     query = (
-        db.collection("lots")
+        root.collection("lots")
         .where(filter=FieldFilter("broker", "==", broker))
         .where(filter=FieldFilter("status", "==", "open"))
     )
@@ -158,27 +216,28 @@ def replace_open_lots(db, broker: str, lots: list[dict]):
     return len(written), stale
 
 
-def upsert_closed_lot(db, broker: str, lot: dict):
+def upsert_closed_lot(root, broker: str, lot: dict):
     """已平倉部位的進場批次是歷史紀錄，只增不刪。"""
     doc_id = _lot_doc_id(broker, lot)
     data = dict(lot)
     data["broker"] = broker
     data["syncedAt"] = _now_iso()
-    db.collection("lots").document(doc_id).set(data, merge=True)
+    root.collection("lots").document(doc_id).set(data, merge=True)
     return doc_id
 
 
-def upsert_realized(db, broker: str, record: dict):
+def upsert_realized(root, broker: str, record: dict):
     """已實現損益是歷史事實，只增不刪。dseq 實測唯一，加日期防跨年重複。"""
     doc_id = f"{broker}_{record['sellDate']}_{record['dseq']}"
     data = dict(record)
     data["broker"] = broker
     data["syncedAt"] = _now_iso()
-    db.collection("realized").document(doc_id).set(data, merge=True)
+    root.collection("realized").document(doc_id).set(data, merge=True)
     return doc_id
 
 
 def upsert_quote(db, market: str, symbol: str, price: float, source: str):
+    """現價是市場資料，放最上層共用。"""
     doc_id = symbol_key(market, symbol)
     db.collection("quotes").document(doc_id).set(
         {
@@ -193,10 +252,11 @@ def upsert_quote(db, market: str, symbol: str, price: float, source: str):
     return doc_id
 
 
-def set_sync_meta(db, broker: str, success: bool, error: str | None):
+def set_sync_meta(root, broker: str, success: bool, error: str | None):
+    """同步狀態是個人的：她的永豐同步掛了不該顯示在你的畫面上。"""
     data = {
         "lastSyncAt": _now_iso(),
         "lastSuccess": success,
         "lastError": error,
     }
-    db.collection("syncMeta").document(broker).set(data, merge=True)
+    root.collection("syncMeta").document(broker).set(data, merge=True)

@@ -2,6 +2,45 @@
 
 collection 名稱與欄位皆固定如下，改動前先更新本檔案。
 
+## 多使用者的資料位置
+
+個人資料放在 `users/{uid}/` 底下，市場資料留在最上層共用：
+
+| 位置 | collection | 為什麼 |
+|---|---|---|
+| `users/{uid}/` | `trades`、`positions`、`lots`、`realized`、`options`、`dividends`、`settings`、`syncMeta` | 個人資料，兩個帳號彼此讀不到（規則見 `firestore.rules`） |
+| 最上層 | `quotes`、`symbols`、`fx`、`calendarEvents` | 市場資料不是個人資料。共用同一份可以省 API 額度，也不用為每個人重複抓同一檔 |
+| 最上層 | `allowlist` | 開通名單，只有擁有者能改 |
+| 最上層 | `users/{uid}` 本身 | profile（`email`、`lastSeenAt`）。同步腳本靠這個列出所有使用者 |
+
+下面每個 collection 的段落只寫 document ID 與欄位，路徑前綴依上表。
+
+存取的寫法（兩邊必須一致，不然會變成一邊寫得進去、另一邊查不到）：
+
+| 端 | 個人資料 | 共用資料 |
+|---|---|---|
+| `web/app.js` | `myCol(name)` / `myDoc(name, id)` | `sharedCol(name)` / `sharedDoc(name, id)` |
+| `sync/*.py` | `user_root(db)` 取得的 `root` | `db` 本身 |
+
+`user_root()` 讀環境變數 `SYNC_USER_UID` 決定這次同步誰，**沒設定就直接失敗**。
+不給預設值是故意的：預設值會讓 workflow 漏設時，把 A 的券商資料靜靜寫進 B 的帳號，
+而畫面上看起來完全正常。
+
+共用資料的同步（現價／名稱／匯率／行事曆）要涵蓋**所有**使用者的持股，
+用 `all_user_roots(db)` 或 `scan_all_users(db, coll)`；只掃自己的會讓
+另一個人的部位顯示未估值、或只有代號沒有名稱。
+
+### 開通名單為什麼存在
+
+註冊是開放的（登入頁就能註冊），所以「已登入」不等於「可以用」。
+`allowlist/{email}` 存在才有任何讀寫權限，否則 App 顯示「尚未開通」。
+少了這一層，任何人在公開網址上註冊就能耗用 Firebase 的免費額度。
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| addedAt | string | ISO8601 |
+| addedBy | string | 誰加的（擁有者的 email） |
+
 ## 為什麼有兩套資料來源
 
 永豐 Shioaji **沒有**「原始每筆買賣」的 API。實測結論（見 `sync/shioaji_selftest.py`）：
@@ -15,6 +54,8 @@ collection 名稱與欄位皆固定如下，改動前先更新本檔案。
 |---|---|---|
 | 永豐同步 | `positions`、`realized` | 券商算好，直接存 |
 | 手動輸入（美股等） | `trades` | 前端用移動平均法自己算 |
+
+（以上都在 `users/{uid}/` 底下，見上一節）
 
 ---
 
@@ -192,7 +233,7 @@ document ID = `schwab_{underlying}_{expiry}_{strike}_{kind}`。
 - `Expired Rights`（代號像 `29415C127`）是**認購權證到期**不是選擇權，不要塞進這個 collection。
 
 ## collection: `settings`
-使用者層級的設定。目前只有一份 document：`settings/import`。
+使用者層級的設定，各自獨立。目前只有一份 document：`users/{uid}/settings/import`。
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
@@ -204,6 +245,9 @@ document ID = `schwab_{underlying}_{expiry}_{strike}_{kind}`。
 嘉信匯出檔是**整段歷史**，每次匯出都包含全部紀錄。使用者刪掉某檔的紀錄後，
 下次匯入又會原封不動長回來——刪除必須是持久的，所以刪掉整檔時把代號寫進這份清單，
 `parseSchwabExport()` 與 `quotes_sync.py` 都會跳過它。
+
+忽略清單是各自的：A 刪掉某一檔，不該讓還持有它的 B 也抓不到現價，
+所以 `quotes_sync.py` 只跳過「所有人都忽略」的代號。
 
 ## collection: `fx`
 匯率。document ID = `{base}{quote}`，例如 `USDTWD`。由 `sync/fx_sync.py` 每日更新。

@@ -55,15 +55,16 @@ def generate_dry_run_events():
 
 
 def collect_symbols(db):
-    from google.cloud.firestore_v1.base_query import FieldFilter
+    """行事曆是共用資料，要涵蓋所有使用者的持股，不然另一個人的除權息日不會出現。"""
+    from firestore_client import scan_all_users
 
     tw_symbols, us_symbols = set(), set()
-    for market, bucket in (("TW", tw_symbols), ("US", us_symbols)):
-        query = db.collection("trades").where(filter=FieldFilter("market", "==", market))
-        for doc in query.stream():
-            symbol = doc.to_dict().get("symbol")
-            if symbol:
-                bucket.add(symbol)
+    buckets = {"TW": tw_symbols, "US": us_symbols}
+    for doc in scan_all_users(db, "trades"):
+        row = doc.to_dict()
+        bucket = buckets.get(row.get("market"))
+        if bucket is not None and row.get("symbol"):
+            bucket.add(row["symbol"])
     return tw_symbols, us_symbols
 
 
@@ -129,7 +130,7 @@ def main():
         print(json.dumps(generate_dry_run_events(), ensure_ascii=False, indent=2))
         return
 
-    from firestore_client import init_firestore, set_sync_meta, upsert_calendar_event
+    from firestore_client import init_firestore, set_sync_meta_all, upsert_calendar_event
 
     db = init_firestore()
     try:
@@ -150,10 +151,10 @@ def main():
         for event in events:
             upsert_calendar_event(db, event)
 
-        set_sync_meta(db, BROKER, True, None)
+        set_sync_meta_all(db, BROKER, True, None)
         print(f"[calendar_sync] 同步完成，共 {len(events)} 筆行事曆事件")
     except Exception as e:
-        set_sync_meta(db, BROKER, False, str(e))
+        set_sync_meta_all(db, BROKER, False, str(e))
         raise
 
 

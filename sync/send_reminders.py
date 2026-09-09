@@ -2,7 +2,10 @@
 把 Firestore `calendarEvents` 裡近期的除權息日／財報日，彙整成一封提醒信寄出。
 PWA 內也看得到這些日期，但那要自己想到去開 App；這支腳本負責主動推到信箱。
 
-環境變數：SENDER_EMAIL、GMAIL_APP_PASSWORD、RECIPIENT_EMAIL
+`calendarEvents` 是所有使用者共用的一份，所以這裡要先篩成「這個人有的代號」，
+不然會收到另一個人持股的除權息提醒。每個使用者各跑一次，各寄到自己的信箱。
+
+環境變數：SYNC_USER_UID、SENDER_EMAIL、GMAIL_APP_PASSWORD、RECIPIENT_EMAIL
 （選填 SMTP_HOST / SMTP_PORT，預設 smtp.gmail.com:465）
 """
 import argparse
@@ -50,6 +53,21 @@ def fetch_upcoming_events(db, days):
         if data.get("eventDate") and data.get("symbol"):
             events.append(data)
     return events
+
+
+def held_symbols(root):
+    """這個使用者手上出現過的代號，用來篩共用行事曆。
+
+    取 positions 與 trades 的聯集，比「目前持股」寬一點：多寄幾檔已經賣掉的
+    提醒無所謂，漏掉還持有的那檔才是問題。
+    """
+    symbols = set()
+    for coll in ("positions", "trades"):
+        for doc in root.collection(coll).stream():
+            data = doc.to_dict()
+            if data.get("symbol"):
+                symbols.add((data.get("market", "TW"), str(data["symbol"])))
+    return symbols
 
 
 def event_sort_key(event):
@@ -131,12 +149,18 @@ def main():
         print(body)
         return
 
-    from firestore_client import init_firestore
+    from firestore_client import init_firestore, user_root
 
     db = init_firestore()
-    events = fetch_upcoming_events(db, args.days)
+    root = user_root(db)
+
+    mine = held_symbols(root)
+    events = [
+        e for e in fetch_upcoming_events(db, args.days)
+        if (e.get("market", "TW"), str(e.get("symbol"))) in mine
+    ]
     if not events:
-        print(f"[send_reminders] 近 {args.days} 天沒有行事曆事件，不寄信")
+        print(f"[send_reminders] 近 {args.days} 天沒有跟自己持股相關的行事曆事件，不寄信")
         return
 
     subject, body = build_email(events, args.days)

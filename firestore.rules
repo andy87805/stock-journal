@@ -1,72 +1,76 @@
 rules_version = '2';
 
-// 單人個人專案的規則。PWA 放在公開網址（GitHub Pages）上，任何人都拿得到
-// web/firebase-config.js 裡的專案設定，所以「只要求已登入」是不夠的——任何人
-// 都能自己註冊/匿名登入然後讀走交易資料。這裡把讀寫權限綁死在唯一那一個帳號的 UID。
+// 多使用者版本。PWA 放在公開網址（GitHub Pages）上，任何人都拿得到
+// web/firebase-config.js 裡的專案設定，而且註冊是開放的，所以「已登入」完全
+// 不足以當作授權條件——真正的門檻是下面的 isAllowed()。
+//
+// 兩層設計：
+//   1. 開通名單 allowlist/{email}：由擁有者在 App 的「設定」頁加。沒被列進來的
+//      帳號可以註冊、可以登入，但讀寫一律被拒，App 會顯示「尚未開通」。
+//   2. 資料隔離 users/{uid}/...：就算被開通了，也只碰得到自己 UID 底下那一份。
 //
 // Python 同步腳本走 Firebase Admin SDK + 服務帳戶金鑰，Admin SDK 完全繞過
 // Security Rules，不受這裡限制，所以不需要為它開任何權限。
 //
-// 設定方式：在 Firebase Console → Authentication → Users 建立自己的帳號後，
-// 把該列顯示的 User UID 填進下面的 OWNER_UID，然後重新部署：
-//   firebase deploy --only firestore:rules
-// 沒填之前一律拒絕（預設安全），登入後會讀不到任何資料。
+// 部署：firebase deploy --only firestore:rules
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function ownerOnly() {
-      let OWNER_UID = 'czOCfZWUr5WunUdv5UCpJ9zRPef1';
-      return request.auth != null && request.auth.uid == OWNER_UID;
+    // 擁有者的 UID（Firebase Console → Authentication → Users 那一欄）。
+    // 擁有者永遠通過 isAllowed()，這樣就算 allowlist 被自己清空也不會把自己鎖在外面。
+    function ownerUid() {
+      return 'czOCfZWUr5WunUdv5UCpJ9zRPef1';
     }
 
-    // 新增 collection 時一定要同步加這裡：Firestore 對沒有 match 到的路徑一律拒絕，
-    // 前端會收到 permission-denied 而不是空資料，看起來像同步壞掉。
-    match /positions/{positionId} {
-      allow read, write: if ownerOnly();
+    function isOwner() {
+      return request.auth != null && request.auth.uid == ownerUid();
     }
 
-    match /realized/{realizedId} {
-      allow read, write: if ownerOnly();
+    // 規則裡的 exists() 是以管理者身分執行，不會再套用下面 allowlist 的讀取規則，
+    // 所以這裡查得到，不代表使用者自己讀得到別人那筆。
+    function isAllowed() {
+      return request.auth != null && (
+        isOwner() ||
+        exists(/databases/$(database)/documents/allowlist/$(request.auth.token.email))
+      );
     }
 
-    match /lots/{lotId} {
-      allow read, write: if ownerOnly();
+    // 每個人的交易資料各自放在 users/{uid} 底下，彼此讀不到也寫不到。
+    // 新增 collection 時不用再改規則：{document=**} 會涵蓋所有子集合。
+    match /users/{uid} {
+      allow read, write: if isAllowed() && request.auth.uid == uid;
+
+      match /{document=**} {
+        allow read, write: if isAllowed() && request.auth.uid == uid;
+      }
     }
 
-    match /options/{optionId} {
-      allow read, write: if ownerOnly();
+    // 行情類資料是市場資料不是個人資料，開通的使用者共用同一份：
+    // 省 API 額度，也不用為了兩個人重複抓同一檔的價格與名稱。
+    // 寫入基本上都由同步腳本走 Admin SDK 完成（繞過這裡的規則）。
+    match /quotes/{quoteId} {
+      // 現價要留給前端寫：債券 CUSIP、下市股這種抓不到報價的要能手動補
+      allow read, write: if isAllowed();
     }
 
     match /symbols/{symbolId} {
-      allow read, write: if ownerOnly();
-    }
-
-    match /settings/{settingId} {
-      allow read, write: if ownerOnly();
+      allow read: if isAllowed();
     }
 
     match /fx/{pair} {
-      allow read, write: if ownerOnly();
-    }
-
-    match /trades/{tradeId} {
-      allow read, write: if ownerOnly();
-    }
-
-    match /dividends/{dividendId} {
-      allow read, write: if ownerOnly();
+      allow read: if isAllowed();
     }
 
     match /calendarEvents/{eventId} {
-      allow read, write: if ownerOnly();
+      allow read: if isAllowed();
     }
 
-    match /quotes/{quoteId} {
-      allow read, write: if ownerOnly();
-    }
-
-    match /syncMeta/{broker} {
-      allow read, write: if ownerOnly();
+    // 開通名單。本人只讀得到自己那一筆（前端用來判斷有沒有被開通），
+    // 名單本身只有擁有者能改，不然被開通的人就能自己拉人進來。
+    match /allowlist/{email} {
+      allow read: if request.auth != null &&
+                     (isOwner() || request.auth.token.email == email);
+      allow write: if isOwner();
     }
   }
 }
