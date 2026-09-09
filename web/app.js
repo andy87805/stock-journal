@@ -29,6 +29,7 @@ const state = {
   trades: [],
   dividends: [],
   options: [],
+  symbols: {},
   events: [],
   quotes: {},
   fx: {},
@@ -87,94 +88,21 @@ const US_ETFS = new Set(["VOO", "SPY", "QQQ", "VTI"]);
 const isEtf = (symbol, market) =>
   market === "TW" ? /^00/.test(symbol) : US_ETFS.has(symbol) || SECTORS[symbol] === "ETF";
 
-// FNV-1a 加尾段混洗：像 2330 / 2331 這種只差一個字元的代號才不會拿到相鄰色相
-const symbolHash = (s) => {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  h ^= h >>> 15;
-  h = Math.imul(h, 2246822507);
-  return (h ^ (h >>> 13)) >>> 0;
-};
-
-// 紅與綠在這個 App 是漲跌的語意色，底色刻意避開，免得被讀成損益
-const ICON_HUES = [206, 224, 242, 260, 278, 296, 316, 334, 24, 38, 188, 172];
-
-const SVG_NS = "http://www.w3.org/2000/svg";
-
-// 有真實標誌檔的代號列在這裡，檔案放 web/logos/{代號}.svg 或 .png。
-// 要新增就把方形圖檔丟進那個目錄、代號加進這個表，不用改其他程式。
-// 沒列在這裡的一律用下面產生的圖示——台灣的投信與多數上市公司只有橫式文字商標，
-// 硬塞進 28px 方格會變成看不清的色塊，用產生的圖示反而好認。
-const SYMBOL_LOGOS = {
-  "TW:2882": "logos/2882.svg",
-};
-
-function symbolIcon(symbol, market = "TW") {
-  const sym = String(symbol || "");
-  const logo = SYMBOL_LOGOS[`${market}:${sym}`];
-  if (logo) {
-    // 檔案掛掉就換回產生的圖示，不要留一個破圖
-    const img = el("img", { class: "sym-icon sym-logo", src: logo, alt: sym, loading: "lazy" });
-    img.addEventListener("error", () => img.replaceWith(generatedIcon(sym, market)));
-    return img;
-  }
-  return generatedIcon(sym, market);
+// 顯示名稱：介面上只有 2330 這種代號很難認，改成「台積電 2330」。
+// 台股名稱由 sync/symbols_sync.py 從 TWSE 開放資料寫進 symbols；
+// 美股名稱是嘉信匯出檔匯入時從 Description 一併寫入的。查不到就只顯示代號。
+function symbolName(symbol, market = "TW") {
+  const hit = state.symbols[`${market}:${symbol}`];
+  return hit && hit.name ? hit.name : "";
 }
 
-function generatedIcon(symbol, market = "TW") {
-  const sym = String(symbol || "");
-  const h = symbolHash(`${market}:${sym}`);
-  const hue = ICON_HUES[h % ICON_HUES.length];
-  const lightness = 34 + ((h >>> 8) % 3) * 6;
-  const etf = isEtf(sym, market);
-
-  const ns = (tag, attrs = {}) => {
-    const n = document.createElementNS(SVG_NS, tag);
-    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
-    return n;
-  };
-
-  const svg = ns("svg", {
-    viewBox: "0 0 32 32",
-    class: "sym-icon",
-    role: "img",
-    "aria-label": etf ? `${sym} ETF` : sym,
-  });
-  svg.appendChild(
-    ns("rect", {
-      x: 0.5,
-      y: 0.5,
-      width: 31,
-      height: 31,
-      rx: 8,
-      class: "plate",
-      fill: `hsl(${hue}, 56%, ${lightness}%)`,
-    })
-  );
-
-  if (etf) {
-    // 疊層圖示：一眼看出是一籃子成分股而不是單一公司
-    svg.appendChild(ns("path", { d: "M16 6 L26 11 L16 16 L6 11 Z", class: "glyph" }));
-    svg.appendChild(ns("path", { d: "M6.5 15.6 L16 20.3 L25.5 15.6", class: "glyph-line", opacity: "0.8" }));
-    svg.appendChild(ns("path", { d: "M6.5 19.9 L16 24.6 L25.5 19.9", class: "glyph-line", opacity: "0.55" }));
-    return svg;
-  }
-
-  // 台股 4 位數字、美股字母，字級隨長度縮放才能在 28px 下都看得清楚
-  const label = sym.slice(0, 4).toUpperCase() || "?";
-  const size = label.length <= 2 ? 15 : label.length === 3 ? 13 : 10.5;
-  const text = ns("text", {
-    x: 16,
-    y: 16 + size * 0.35,
-    "text-anchor": "middle",
-    "font-size": size,
-  });
-  text.textContent = label;
-  svg.appendChild(text);
-  return svg;
+// 代號與名稱一起顯示。名稱在前、代號在後，跟券商 App 的習慣一致。
+function symbolLabel(symbol, market = "TW") {
+  const name = symbolName(symbol, market);
+  return el("span", { class: "sym-label" }, [
+    name ? el("span", { class: "sym-name", text: name }) : null,
+    el("span", { class: "mono sym-code", text: String(symbol ?? "") }),
+  ]);
 }
 
 /* ---------- utils ---------- */
@@ -374,7 +302,9 @@ function allPositions() {
     market: p.market,
     currency: p.currency,
     // 零股的 lots 是 0，用 lots × 1000 回推股數會得到 0，只能用金額回推
-    shares: p.avgPrice > 0 ? p.totalCost / p.avgPrice : null,
+    // 券商只給到小數兩位的均價，成本 ÷ 均價 會帶進除法誤差（9038.6002 這種）。
+    // 台股不會有小數股，四捨五入才不會顯示出根本不存在的精確度。
+    shares: p.avgPrice > 0 ? Math.round(p.totalCost / p.avgPrice) : null,
     avgCost: p.avgPrice,
     totalCost: p.totalCost,
     lastPrice: p.lastPrice || null,
@@ -687,6 +617,16 @@ function subscribe() {
     render();
   });
 
+  onSnapshot(collection(db, "symbols"), (snap) => {
+    const map = {};
+    for (const d of snap.docs) {
+      const v = d.data();
+      map[d.id] = { symbol: v.symbol, market: v.market, name: v.name || "" };
+    }
+    state.symbols = map;
+    render();
+  });
+
   onSnapshot(collection(db, "options"), (snap) => {
     state.options = snap.docs.map((d) => normalizeOption(d.id, d.data()));
     state.options.sort((a, b) => (b.openDate || "").localeCompare(a.openDate || ""));
@@ -850,10 +790,23 @@ const contractKey = (c) => `schwab_${c.underlying}_${c.expiry}_${c.strike}_${c.k
 const stableId = (parts) =>
   parts.map((p) => String(p ?? "").replace(/[^\w.-]/g, "")).join("_");
 
+const NAME_KEEP_UPPER = new Set(["ETF", "REIT", "ADR", "USA", "US", "II", "III", "IV", "AG", "SA", "NV", "PLC"]);
+
+const titleCaseName = (raw) =>
+  String(raw || "")
+    .trim()
+    .split(/\s+/)
+    .map((w) =>
+      NAME_KEEP_UPPER.has(w.toUpperCase())
+        ? w.toUpperCase()
+        : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+    )
+    .join(" ");
+
 function parseSchwabExport(json) {
   const rows = (json && json.BrokerageTransactions) || [];
   const out = {
-    trades: [], dividends: [], options: [],
+    trades: [], dividends: [], options: [], names: {},
     ignored: 0, ignoredActions: {}, unclassified: [],
     range: { from: json?.FromDate || "", to: json?.ToDate || "" },
     total: rows.length,
@@ -893,6 +846,7 @@ function parseSchwabExport(json) {
         out.unclassified.push({ action, symbol, date: row.Date, why: "缺少代號、日期或股數" });
         continue;
       }
+      if (row.Description && !out.names[symbol]) out.names[symbol] = titleCaseName(row.Description);
       const externalId = stableId([date, symbol, isBuy ? "B" : "S", quantity, price, amount]);
       out.trades.push({
         broker: "schwab", symbol, market: "US", currency: "USD",
@@ -1007,6 +961,13 @@ async function importSchwab(parsed, onProgress) {
   for (const o of parsed.options) {
     const { id, staleOpen, ...data } = o;
     writes.push({ ref: doc(db, "options", id), data: { ...data, syncedAt } });
+  }
+  // 匯出檔的 Description 就是公司名稱，順便存起來讓介面顯示「Tesla Inc TSLA」
+  for (const [symbol, name] of Object.entries(parsed.names)) {
+    writes.push({
+      ref: doc(db, "symbols", `US:${symbol}`),
+      data: { symbol, market: "US", name, source: "schwab", updatedAt: syncedAt },
+    });
   }
 
   await commitInBatches(writes, onProgress);
@@ -1421,10 +1382,9 @@ const brokerLabel = { sinopac: "永豐", schwab: "嘉信", manual: "手動" };
 function tradeRow(t) {
   const amount = t.quantity * t.price;
   return el("div", { class: "box-row" }, [
-    symbolIcon(t.symbol, t.market),
     el("div", { class: "row-main" }, [
       el("div", { class: "row-title" }, [
-        el("span", { class: "mono", text: t.symbol }),
+        symbolLabel(t.symbol, t.market),
         el("span", { class: `label-pill ${t.side}`, text: t.side === "buy" ? "買" : "賣" }),
         t.note ? el("span", { class: "label-pill", text: "備註" }) : null,
       ]),
@@ -1443,10 +1403,9 @@ function tradeRow(t) {
 function eventRow(e) {
   const days = Math.ceil((e.eventDate.getTime() - Date.now()) / DAY_MS);
   return el("div", { class: "box-row" }, [
-    symbolIcon(e.symbol, e.market),
     el("div", { class: "row-main" }, [
       el("div", { class: "row-title" }, [
-        el("span", { class: "mono", text: e.symbol }),
+        symbolLabel(e.symbol, e.market),
         el("span", {
           class: `label-pill ${e.type === "earnings" ? "accent" : ""}`,
           text: e.type === "earnings" ? "財報" : "除權息",
@@ -1502,11 +1461,10 @@ function positionRow(p) {
   // 現價與損益放在標題那一行的右側，明細行才能用滿整個寬度。
   // 之前現價是獨立的右欄，會把明細擠成每個詞一行、還出現落單的分隔點。
   return el("div", { class: "box-row" }, [
-    symbolIcon(p.symbol, p.market),
     el("div", { class: "row-main" }, [
       el("div", { class: "row-head" }, [
         el("div", { class: "row-title" }, [
-          el("span", { class: "mono", text: p.symbol }),
+          symbolLabel(p.symbol, p.market),
           el("span", { class: "label-pill", text: p.market }),
           el("span", { class: `label-pill src-${p.source}`, text: SOURCE_LABEL[p.source] || p.source }),
           p.cond && p.cond !== "Cash"
@@ -1581,10 +1539,9 @@ function ledgerRow(tx) {
         ];
 
   const row = el("div", { class: "box-row" }, [
-    symbolIcon(tx.symbol, tx.market),
     el("div", { class: "row-main" }, [
       el("div", { class: "row-title" }, [
-        el("span", { class: "mono", text: tx.symbol }),
+        symbolLabel(tx.symbol, tx.market),
         el("span", { class: "label-pill", text: tx.market }),
         el("span", { class: `label-pill ${tx.side}`, text: tx.side === "buy" ? "買" : "賣" }),
         el("span", { class: `label-pill src-${tx.source}`, text: SOURCE_LABEL[tx.source] || tx.source }),
@@ -1953,10 +1910,9 @@ function realizedRow(l) {
   if (l.exDividendAmt) parts.push(`配息 ${fmtMoney(l.exDividendAmt, l.currency)}`);
 
   return el("div", { class: "box-row" }, [
-    symbolIcon(l.symbol, l.market),
     el("div", { class: "row-main" }, [
       el("div", { class: "row-title" }, [
-        el("span", { class: "mono", text: l.symbol }),
+        symbolLabel(l.symbol, l.market),
         el("span", { class: "label-pill", text: l.market }),
         el("span", { class: `label-pill src-${l.source}`, text: SOURCE_LABEL[l.source] || l.source }),
       ]),
@@ -2248,10 +2204,9 @@ function viewStats() {
     .sort((a, b) => b.pnl - a.pnl)
     .map((s) =>
       el("div", { class: "box-row" }, [
-        symbolIcon(s.symbol, s.market),
         el("div", { class: "row-main" }, [
           el("div", { class: "row-title" }, [
-            el("span", { class: "mono", text: s.symbol }),
+            symbolLabel(s.symbol, s.market),
             el("span", { class: "label-pill", text: s.market }),
           ]),
           el("div", { class: "row-sub", text: `${s.n} 筆 · 勝率 ${fmtNum((s.w / s.n) * 100, 0)}%` }),
@@ -2309,10 +2264,9 @@ function viewDividends() {
             if (s.holding) parts.push(`持有中 ${fmtMoney(s.holding, s.currency)}`);
             if (s.closed) parts.push(`已平倉 ${fmtMoney(s.closed, s.currency)}`);
             return el("div", { class: "box-row" }, [
-              symbolIcon(s.symbol, s.market),
               el("div", { class: "row-main" }, [
                 el("div", { class: "row-title" }, [
-                  el("span", { class: "mono", text: s.symbol }),
+                  symbolLabel(s.symbol, s.market),
                   el("span", { class: "label-pill", text: s.market }),
                   el("span", { class: "label-pill src-sinopac", text: "永豐" }),
                 ]),
@@ -2334,10 +2288,9 @@ function viewDividends() {
         `${year} 年（有發放日期）`,
         list.map((d) =>
           el("div", { class: "box-row" }, [
-            symbolIcon(d.symbol, d.market),
             el("div", { class: "row-main" }, [
               el("div", { class: "row-title" }, [
-                el("span", { class: "mono", text: d.symbol }),
+                symbolLabel(d.symbol, d.market),
                 el("span", { class: "label-pill", text: d.market }),
               ]),
               el("div", {
@@ -2568,11 +2521,10 @@ function optionRow(o) {
   if (o.status === "open" && !o.staleOpen && days !== null) parts.push(`剩 ${days} 天`);
 
   return el("div", { class: "box-row" }, [
-    symbolIcon(o.underlying, o.market),
     el("div", { class: "row-main" }, [
       el("div", { class: "row-head" }, [
         el("div", { class: "row-title" }, [
-          el("span", { class: "mono", text: o.underlying }),
+          symbolLabel(o.underlying, o.market),
           el("span", { class: `label-pill ${o.kind === "P" ? "sell" : "buy"}`, text: o.kind === "P" ? "賣權" : "買權" }),
           o.staleOpen ? el("span", { class: "label-pill", text: "無結算紀錄" }) : null,
         ]),

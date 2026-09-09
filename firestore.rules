@@ -37,6 +37,10 @@ service cloud.firestore {
       allow read, write: if ownerOnly();
     }
 
+    match /symbols/{symbolId} {
+      allow read, write: if ownerOnly();
+    }
+
     match /fx/{pair} {
       allow read, write: if ownerOnly();
     }

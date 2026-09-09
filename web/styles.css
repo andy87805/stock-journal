@@ -309,48 +309,23 @@ main {
   margin-top: 2px;
 }
 
-/* 代號圖示（本機生成，沒有外部 logo 來源） */
+/* 名稱與代號：名稱為主、代號為輔 */
 
-.sym-icon {
-  width: 28px;
-  height: 28px;
-  flex-shrink: 0;
-  align-self: flex-start;
-  margin-top: 1px;
-  display: block;
+.sym-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
 }
 
-/* 真實標誌：不裁切、置中，比例不是正方形也不會變形 */
-.sym-icon.sym-logo {
-  object-fit: contain;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--fg) 6%, transparent);
-  padding: 2px;
-}
-
-.sym-icon .plate {
-  stroke: color-mix(in srgb, var(--fg) 14%, transparent);
-  stroke-width: 1;
-}
-
-/* 底色固定是中明度彩色，白字白圖在淺色與深色主題下都一樣清楚 */
-.sym-icon .glyph {
-  fill: #ffffff;
-}
-
-.sym-icon .glyph-line {
-  fill: none;
-  stroke: #ffffff;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.sym-icon text {
-  fill: #ffffff;
+.sym-name {
   font-weight: 600;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-    "Liberation Mono", monospace;
+}
+
+.sym-code {
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 /* pills / labels */

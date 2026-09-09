@@ -52,6 +52,12 @@ jobs:
         continue-on-error: true
         run: python sync/calendar_sync.py
 
+      # 介面要顯示「台積電 2330」而不只是代號，名稱從 TWSE 開放資料抓
+      - name: Sync Symbols (代號名稱)
+        id: symbols
+        continue-on-error: true
+        run: python sync/symbols_sync.py --only-held
+
       # 總覽要把美股換算成台幣加總，匯率在這裡抓（前端直連有 CORS 與離線問題）
       - name: Sync FX (匯率)
         id: fx
@@ -74,6 +80,7 @@ jobs:
           if [ "${{ steps.shioaji.outcome }}" = "failure" ] || \
              [ "${{ steps.schwab.outcome }}" = "failure" ] || \
              [ "${{ steps.calendar.outcome }}" = "failure" ] || \
+             [ "${{ steps.symbols.outcome }}" = "failure" ] || \
              [ "${{ steps.fx.outcome }}" = "failure" ] || \
              [ "${{ steps.reminders.outcome }}" = "failure" ]; then
             echo "至少一支同步腳本失敗，詳見上方對應步驟的 log"

@@ -82,6 +82,7 @@ def build_positions(api, account):
     positions = []
     quotes = []
     open_lots = []
+    undated = 0
     for pos in api.list_positions(account):
         symbol = str(getattr(pos, "code", "")).strip()
         if not symbol:
@@ -105,22 +106,26 @@ def build_positions(api, account):
                 day = _date_str(getattr(det, "date", None))
                 if day:
                     entry_dates.append(day)
-                    open_lots.append(
-                        {
-                            "symbol": symbol,
-                            "market": MARKET,
-                            "currency": CURRENCY,
-                            "status": "open",
-                            "tradeDate": day,
-                            "lots": _f(getattr(det, "quantity", 0)),
-                            "cost": round(lot_cost, 2),
-                            "unitPrice": None,  # 庫存明細只給總額，沒有單價
-                            "fee": _f(getattr(det, "fee", 0)),
-                            "exDividends": round(lot_dividends, 2),
-                            "dseq": str(getattr(det, "dseq", "") or ""),
-                            "seq": lot_index,
-                        }
-                    )
+                else:
+                    # 沒有日期也要建立批次。之前跳過會讓成本進了 totalCost 卻沒有對應批次，
+                    # 批次加總就對不上部位（實測 00891 因此少 5,295 元）。
+                    undated += 1
+                open_lots.append(
+                    {
+                        "symbol": symbol,
+                        "market": MARKET,
+                        "currency": CURRENCY,
+                        "status": "open",
+                        "tradeDate": day or None,
+                        "lots": _f(getattr(det, "quantity", 0)),
+                        "cost": round(lot_cost, 2),
+                        "unitPrice": None,  # 庫存明細只給總額，沒有單價
+                        "fee": _f(getattr(det, "fee", 0)),
+                        "exDividends": round(lot_dividends, 2),
+                        "dseq": str(getattr(det, "dseq", "") or ""),
+                        "seq": lot_index,
+                    }
+                )
         except Exception as exc:
             print(f"  [warn] {symbol} 庫存明細讀取失敗，改用均價推估總成本: {exc}")
 
@@ -148,6 +153,8 @@ def build_positions(api, account):
         if last_price > 0:
             quotes.append({"symbol": symbol, "price": last_price})
 
+    if undated:
+        print(f"  [warn] {undated} 筆庫存明細沒有日期，仍建立批次但 tradeDate 留空")
     return positions, quotes, open_lots
 
 
