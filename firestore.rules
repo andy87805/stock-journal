@@ -41,6 +41,10 @@ service cloud.firestore {
       allow read, write: if ownerOnly();
     }
 
+    match /settings/{settingId} {
+      allow read, write: if ownerOnly();
+    }
+
     match /fx/{pair} {
       allow read, write: if ownerOnly();
     }

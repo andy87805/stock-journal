@@ -191,6 +191,20 @@ document ID = `schwab_{underlying}_{expiry}_{strike}_{kind}`。
   合約資訊在 `Description`（`5 TSLL1 12/19/2025 22.00 C`），要有從 Description 解析的退路。
 - `Expired Rights`（代號像 `29415C127`）是**認購權證到期**不是選擇權，不要塞進這個 collection。
 
+## collection: `settings`
+使用者層級的設定。目前只有一份 document：`settings/import`。
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| ignoredSymbols | string[] | 匯入時要跳過的代號（美股用 ticker，台股用代號） |
+| updatedAt | string | ISO8601 |
+
+### 為什麼需要忽略清單
+
+嘉信匯出檔是**整段歷史**，每次匯出都包含全部紀錄。使用者刪掉某檔的紀錄後，
+下次匯入又會原封不動長回來——刪除必須是持久的，所以刪掉整檔時把代號寫進這份清單，
+`parseSchwabExport()` 與 `quotes_sync.py` 都會跳過它。
+
 ## collection: `fx`
 匯率。document ID = `{base}{quote}`，例如 `USDTWD`。由 `sync/fx_sync.py` 每日更新。
 

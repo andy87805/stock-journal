@@ -30,6 +30,7 @@ const state = {
   dividends: [],
   options: [],
   symbols: {},
+  settings: {},
   events: [],
   quotes: {},
   fx: {},
@@ -621,6 +622,11 @@ function subscribe() {
     render();
   });
 
+  onSnapshot(doc(db, "settings", "import"), (snap) => {
+    state.settings = snap.exists() ? snap.data() : {};
+    render();
+  });
+
   onSnapshot(collection(db, "symbols"), (snap) => {
     const map = {};
     for (const d of snap.docs) {
@@ -681,7 +687,7 @@ function subscribe() {
     const q = {};
     for (const d of snap.docs) {
       const v = d.data();
-      q[d.id] = { price: Number(v.price) || 0, updatedAt: parseDate(v.updatedAt) };
+      q[d.id] = { price: Number(v.price) || 0, source: v.source || "manual", updatedAt: parseDate(v.updatedAt) };
     }
     state.quotes = q;
     render();
@@ -729,6 +735,57 @@ async function addManualTrade(data) {
 
 async function deleteTrade(id) {
   await deleteDoc(doc(db, "trades", id));
+}
+
+/* ---------- 刪除交易紀錄 ---------- */
+
+// 嘉信匯出檔是整段歷史，刪掉的紀錄下次匯入會原封不動長回來。
+// 所以整檔刪除時把代號寫進忽略清單，匯入與抓現價都會跳過它，刪除才是持久的。
+async function setIgnoredSymbols(symbols) {
+  await setDoc(
+    doc(db, "settings", "import"),
+    { ignoredSymbols: symbols, updatedAt: new Date().toISOString() },
+    { merge: true }
+  );
+}
+
+// 一筆交易可能同時對應多個 collection 的文件（買進批次、平倉、選擇權合約…），
+// 這裡按代號把相關文件一起清掉，不然畫面上會留下半套資料。
+function relatedDocRefs(symbols, market) {
+  const set = new Set(symbols);
+  const refs = [];
+  for (const t of state.trades) {
+    if (set.has(t.symbol) && t.market === market) refs.push(doc(db, "trades", t.id));
+  }
+  for (const d of state.dividends) {
+    if (set.has(d.symbol) && d.market === market) refs.push(doc(db, "dividends", d.id));
+  }
+  for (const l of state.lots) {
+    if (set.has(l.symbol) && l.market === market) refs.push(doc(db, "lots", l.id));
+  }
+  for (const r of state.realized) {
+    if (set.has(r.symbol) && r.market === market) refs.push(doc(db, "realized", r.id));
+  }
+  for (const o of state.options) {
+    if (set.has(o.underlying) && o.market === market) refs.push(doc(db, "options", o.id));
+  }
+  for (const sym of set) {
+    refs.push(doc(db, "quotes", symbolKey(market, sym)));
+    refs.push(doc(db, "symbols", symbolKey(market, sym)));
+  }
+  return refs;
+}
+
+async function deleteDocsInBatches(refs, onProgress) {
+  let done = 0;
+  for (let i = 0; i < refs.length; i += BATCH_LIMIT) {
+    const batch = writeBatch(db);
+    for (const ref of refs.slice(i, i + BATCH_LIMIT)) batch.delete(ref);
+    await batch.commit();
+    done += Math.min(BATCH_LIMIT, refs.length - i);
+    if (onProgress) onProgress(done, refs.length);
+  }
+  return done;
 }
 
 /* ---------- 嘉信匯出檔解析 ---------- */
@@ -811,10 +868,11 @@ const titleCaseName = (raw) =>
     )
     .join(" ");
 
-function parseSchwabExport(json) {
+function parseSchwabExport(json, ignoredSymbols = []) {
   const rows = (json && json.BrokerageTransactions) || [];
+  const ignoredSet = new Set(ignoredSymbols);
   const out = {
-    trades: [], dividends: [], options: [], names: {},
+    trades: [], dividends: [], options: [], names: {}, skippedBySymbol: 0,
     ignored: 0, ignoredActions: {}, unclassified: [],
     range: { from: json?.FromDate || "", to: json?.ToDate || "" },
     total: rows.length,
@@ -829,6 +887,12 @@ function parseSchwabExport(json) {
     const symbol = String(row.Symbol || "").trim();
     const amount = parseMoney(row.Amount);
     const fee = parseMoney(row["Fees & Comm"]);
+
+    // 使用者刪掉整檔後會列進忽略清單，不然每次匯入都會把刪掉的資料長回來
+    if (symbol && ignoredSet.has(symbol)) {
+      out.skippedBySymbol++;
+      continue;
+    }
 
     if (SCHWAB_ACTIONS.ignore.has(action)) {
       out.ignored++;
@@ -1273,6 +1337,7 @@ const viewOptions = {
   exposureMode: "symbol",
   exposureCurrency: null,
   reportYear: null,
+  ledgerQuery: "",
   ledgerYear: "all",
   ledgerMonth: "all",
   ledgerPage: 1,
@@ -1463,8 +1528,12 @@ function positionRow(p) {
   }
 
   // 只有永豐部位的現價是同步寫進來的，其餘（手動、嘉信匯入）都沒有自動來源，要能手填
+  // 同步抓得到的現價顯示唯讀（手改了下次同步也會被蓋回去）；
+  // 抓不到的（債券 CUSIP、下市股）與手填過的才給輸入框，讓使用者能自己填或改錯字。
+  const quote = state.quotes[symbolKey(p.market, p.symbol)];
+  const priceIsManual = !quote || quote.source === "manual";
   const priceNode =
-    p.source !== "sinopac"
+    priceIsManual
       ? el("input", {
           class: "price-input mono",
           type: "number",
@@ -1588,10 +1657,17 @@ function viewLedger() {
   const year = viewOptions.ledgerYear;
   const month = viewOptions.ledgerMonth;
 
+  const q = viewOptions.ledgerQuery.trim().toLowerCase();
+  const matchesQuery = (t) =>
+    !q ||
+    t.symbol.toLowerCase().includes(q) ||
+    symbolName(t.symbol, t.market).toLowerCase().includes(q);
+
   const filtered = all.filter(
     (t) =>
       (year === "all" || t.date.getFullYear() === year) &&
-      (month === "all" || t.date.getMonth() + 1 === month)
+      (month === "all" || t.date.getMonth() + 1 === month) &&
+      matchesQuery(t)
   );
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / LEDGER_PAGE_SIZE));
@@ -1630,7 +1706,26 @@ function viewLedger() {
     ),
   ]);
 
+  const searchInput = el("input", {
+    type: "search",
+    placeholder: "搜尋代號或名稱，例如 2330、台積電、TSLA",
+    value: viewOptions.ledgerQuery,
+    oninput: (ev) => {
+      viewOptions.ledgerQuery = ev.target.value;
+      viewOptions.ledgerPage = 1;
+      render();
+      // 重繪會換掉節點，把焦點與游標位置放回去，不然打一個字就跳出輸入框
+      const next = document.getElementById("ledgerSearch");
+      if (next) {
+        next.focus();
+        next.setSelectionRange(next.value.length, next.value.length);
+      }
+    },
+    id: "ledgerSearch",
+  });
+
   const filters = el("div", { class: "box-body" }, [
+    el("div", { class: "field" }, [el("label", { text: "搜尋" }), searchInput]),
     el("div", { class: "field-row" }, [
       el("div", { class: "field slim" }, [el("label", { text: "年度" }), yearSelect]),
       el("div", { class: "field slim" }, [el("label", { text: "月份" }), monthSelect]),
@@ -1639,6 +1734,9 @@ function viewLedger() {
       class: "row-sub",
       text: "永豐的買進來自逐筆進場批次、賣出來自平倉紀錄；手動輸入的交易點一下可編輯備註或刪除。",
     }),
+    ...(filtered.length && (q || year !== "all" || month !== "all")
+      ? [deleteFilteredPanel(filtered, q)]
+      : []),
   ]);
 
   const pager = el("div", { class: "pager" }, [
@@ -1716,7 +1814,7 @@ async function handleSchwabFile(file) {
   let parsed;
   try {
     // 整份檔案只在瀏覽器裡解析，不會上傳到任何伺服器
-    parsed = parseSchwabExport(JSON.parse(await file.text()));
+    parsed = parseSchwabExport(JSON.parse(await file.text()), state.settings.ignoredSymbols || []);
   } catch (err) {
     panel.replaceChildren(
       el("div", { class: "flash", text: `這個檔案讀不出來：${err.message}。請確認是從嘉信網站「輸出交易數據」選 JSON 匯出的原始檔。` })
@@ -1798,6 +1896,61 @@ function renderImportPreview(panel, parsed, filename) {
   children.push(status);
 
   panel.replaceChildren(...children);
+}
+
+// 搜尋/篩選出一批紀錄後，可以整批刪掉。刪除前先講清楚會動到哪些東西。
+function deleteFilteredPanel(filtered, query) {
+  const symbols = [...new Set(filtered.map((t) => t.symbol))];
+  const markets = [...new Set(filtered.map((t) => t.market))];
+  const wholeSymbol = query && symbols.length >= 1 && markets.length === 1;
+  const status = el("div", { class: "row-sub", style: "margin-top:8px" });
+
+  const ignoreBox = el("input", { type: "checkbox", checked: "", style: "width:auto;margin-right:6px" });
+  const ignoreLabel = el("label", { style: "display:flex;align-items:center;font-weight:400" }, [
+    ignoreBox,
+    el("span", { text: `以後匯入時忽略 ${symbols.join("、")}（不然下次匯入會再長回來）` }),
+  ]);
+
+  const btn = el("button", {
+    class: "btn btn-sm btn-danger",
+    text: `刪除這 ${filtered.length} 筆`,
+    onclick: async () => {
+      const scope = wholeSymbol
+        ? `${symbols.join("、")} 的所有紀錄（含買進批次、平倉、選擇權、股利、現價與名稱）`
+        : `目前篩選出的 ${filtered.length} 筆交易`;
+      if (!confirm(`確定要刪除 ${scope}？這個動作無法復原。`)) return;
+      btn.disabled = true;
+      try {
+        const refs = wholeSymbol
+          ? relatedDocRefs(symbols, markets[0])
+          : filtered.filter((t) => t.kind === "trade").map((t) => doc(db, "trades", t.id));
+        const n = await deleteDocsInBatches(refs, (d, total) => {
+          status.textContent = `刪除中… ${d} / ${total}`;
+        });
+        if (wholeSymbol && ignoreBox.checked) {
+          const current = state.settings.ignoredSymbols || [];
+          await setIgnoredSymbols([...new Set([...current, ...symbols])]);
+        }
+        status.textContent = `已刪除 ${n} 份文件。`;
+        viewOptions.ledgerQuery = "";
+        viewOptions.ledgerPage = 1;
+      } catch (err) {
+        status.textContent = `刪除失敗：${err.message}`;
+        btn.disabled = false;
+      }
+    },
+  });
+
+  return el("div", { class: "flash", style: "margin-top:12px" }, [
+    el("div", {
+      text: wholeSymbol
+        ? `符合「${query}」的有 ${symbols.join("、")}，共 ${filtered.length} 筆。`
+        : `目前篩選出 ${filtered.length} 筆。只會刪掉交易紀錄本身，不會動到平倉或選擇權。`,
+    }),
+    wholeSymbol ? ignoreLabel : null,
+    el("div", { style: "margin-top:8px" }, [btn]),
+    status,
+  ]);
 }
 
 function toggleTradeForm() {

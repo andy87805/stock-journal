@@ -24,12 +24,15 @@ FINNHUB_URL = "https://finnhub.io/api/v1/quote"
 UA = {"User-Agent": "Mozilla/5.0 (compatible; stock-journal/1.0)"}
 
 
-# 券商與 Yahoo 對同一檔的寫法不一致，逐一查證過才加進來。
-# 沒把握的不要亂配：SATS（EchoStar）在 Yahoo 查不到，而 ECHO 查得到卻是完全不同的公司
-# （Echo Global Logistics），配過去就會顯示別人的股價。查不到就讓它維持未估值。
+# 券商與 Yahoo 對同一檔的寫法不一致。每一條都要查證是同一家公司才能加，
+# 配錯就是把別人的股價填到你的部位上，而畫面看起來完全正常。
+# 查不到又沒把握的就別配，讓它維持「未估值」，或在 App 裡手動填。
 YAHOO_ALIASES = {
     "BRKB": "BRK-B",
     "PBRA": "PBR-A",
+    # EchoStar 於 2026-06-24 正式把代號由 SATS 改為 ECHO，Yahoo 上 ECHO 的公司名
+    # 確認是 EchoStar Corporation（不是同名的 Echo Global Logistics）
+    "SATS": "ECHO",
 }
 
 
@@ -63,10 +66,14 @@ def fetch_finnhub(symbol: str, api_key: str):
 
 
 def collect_us_symbols(db):
+    # 使用者刪掉整檔後會列進忽略清單，就不用再為它抓現價
+    settings = db.collection("settings").document("import").get()
+    ignored = set((settings.to_dict() or {}).get("ignoredSymbols", []) if settings.exists else [])
+
     symbols = set()
     for doc in db.collection("trades").stream():
         d = doc.to_dict()
-        if d.get("market") == MARKET and d.get("symbol"):
+        if d.get("market") == MARKET and d.get("symbol") and d["symbol"] not in ignored:
             symbols.add(d["symbol"])
     return sorted(symbols)
 
