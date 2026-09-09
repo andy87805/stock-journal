@@ -156,6 +156,41 @@ document ID = `sinopac_{status}_{symbol}_{tradeDate}_{key}`，`key` 取 `dseq`�
 | source | string | `"sinopac"` \| `"manual"` |
 | updatedAt | string | ISO8601 |
 
+## collection: `options`
+選擇權合約。資料來自 Schwab 網站匯出的 JSON（API 走不通，見 SETUP.md）。
+document ID = `schwab_{underlying}_{expiry}_{strike}_{kind}`。
+
+一個合約一份 doc，開倉與結束都記在同一份，不是每個事件一列。
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| broker | string | `"schwab"` |
+| underlying | string | 標的代號，例如 `"TSLL"` |
+| market | string | `"US"` |
+| currency | string | `"USD"` |
+| kind | string | `"P"`（賣權）\| `"C"`（買權） |
+| side | string | `"short"`（Sell to Open）\| `"long"`（Buy to Open） |
+| strike | number | 履約價 |
+| expiry | string | 到期日 `YYYY-MM-DD` |
+| contracts | number | 口數 |
+| openDate | string | 開倉日 `YYYY-MM-DD` |
+| premium | number | 開倉收付的淨額（`Amount`，賣方為正、買方為負，已含手續費） |
+| fee | number | `Fees & Comm` |
+| status | string | `"open"` \| `"expired"` \| `"assigned"` \| `"closed"` |
+| closeDate | string? | 到期/指派/平倉日 |
+| realizedPnl | number? | 已結束才有。到期作廢的賣方＝權利金全額；被指派＝權利金全額（標的成本由對應的股票買賣紀錄承擔） |
+| note | string? | 使用者筆記，匯入不可覆寫 |
+| syncedAt | string | ISO8601 |
+
+### 已驗證的語意（照實際匯出檔確認過，不要憑猜改）
+
+- **被指派時，標的的買賣另外有一筆 `Buy`/`Sell` 紀錄**。實測：SPCX 賣權 1 口被指派 → 同日有 `Buy 100 股 @ $135.00`；TSLL 賣權 3 口 → `Buy 300 股 @ $18.00`。
+  所以標的成本走一般交易紀錄即可，**選擇權這邊只認列權利金，不要再自己合成一筆股票買進**，否則成本會重複計算。
+- `Expired` / `Assigned` 那一列**沒有 `Price` 也沒有 `Amount`**，權利金只在開倉那一列。
+- 合約代號格式 `{標的} {MM/DD/YYYY} {履約價} {C|P}`。實測有一筆 `Assigned` 的 `Symbol` 是空字串，
+  合約資訊在 `Description`（`5 TSLL1 12/19/2025 22.00 C`），要有從 Description 解析的退路。
+- `Expired Rights`（代號像 `29415C127`）是**認購權證到期**不是選擇權，不要塞進這個 collection。
+
 ## collection: `fx`
 匯率。document ID = `{base}{quote}`，例如 `USDTWD`。由 `sync/fx_sync.py` 每日更新。
 
@@ -171,20 +206,28 @@ document ID = `sinopac_{status}_{symbol}_{tradeDate}_{key}`，`key` 取 `dseq`�
 | updatedAt | string | ISO8601 |
 
 ## collection: `dividends`
-手動輸入的股利紀錄。永豐**沒有**股利查詢 API，台股的配息改用 `positions.exDividends`
+股利與利息。來源有兩個：使用者手動輸入，以及嘉信匯出檔匯入。
+永豐**沒有**股利查詢 API，台股的配息改用 `positions.exDividends`
 與 `realized.exDividendAmt`（累計金額，沒有發放日期）呈現。
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
-| broker | string | |
-| symbol | string | |
+| broker | string | `"manual"` \| `"schwab"` |
+| symbol | string | 現金利息之類沒有代號的填 `"(現金)"` |
 | market | string | |
 | currency | string | |
-| amount | number | 實收金額 |
+| amount | number | 實收金額。**稅費是負數**，見下方 |
+| kind | string | `"dividend"`（股利）\| `"interest"`（利息）\| `"tax"`（稅費） |
 | shares | number? | |
 | payDate | string | ISO8601 |
 | externalId | string | |
 | syncedAt | string | |
+
+### 稅費為什麼存成負數的股利
+
+嘉信的 NRA 扣繳稅、ADR 管理費這類扣款是獨立的一列，日期常常跟對應的股利對不起來，
+硬要配對很脆弱。改成用 `kind: "tax"` 加負數金額存進同一個 collection，
+**加總時自然就是淨額**，畫面也能分開列出來。不要另外再去扣一次，會變成扣兩遍。
 
 ## collection: `calendarEvents`
 | 欄位 | 型別 | 說明 |

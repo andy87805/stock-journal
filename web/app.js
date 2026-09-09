@@ -14,6 +14,7 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  writeBatch,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 
@@ -27,6 +28,7 @@ const state = {
   lots: [],
   trades: [],
   dividends: [],
+  options: [],
   events: [],
   quotes: {},
   fx: {},
@@ -218,6 +220,10 @@ const fmtNum = (n, digits = 2) =>
     ? "—"
     : n.toLocaleString("zh-TW", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 
+// 股利再投資買進的是零碎股（嘉信匯出檔實測最小 0.0415 股），整數位數會顯示成「0 股」
+const fmtShares = (n) =>
+  n === null || n === undefined || isNaN(n) ? "—" : Number.isInteger(n) ? fmtNum(n, 0) : fmtNum(n, 4);
+
 // 沒有匯率可用時的退路：各幣別各自一行，不併成一個數字。
 // 全部金額都是 0（或整包是空的）時沒有幣別可推，由呼叫端指定要用哪一種幣別顯示這個 0。
 const fmtMultiLines = (byCurrency, digits = 0, zeroCurrency = "TWD") => {
@@ -300,6 +306,9 @@ function computeBook(trades) {
     let openedAt = null;
     const [market, symbol] = key.split(":");
     const currency = list[0].currency || (market === "TW" ? "TWD" : "USD");
+    // 同一檔如果混了不同來源（手動補登＋嘉信匯入）就標成 manual，不謊稱是券商資料
+    const brokers = new Set(list.map((t) => t.broker));
+    const broker = brokers.size === 1 ? [...brokers][0] : "manual";
 
     for (const t of list) {
       const qty = Math.abs(t.quantity || 0);
@@ -318,6 +327,7 @@ function computeBook(trades) {
             symbol,
             market,
             currency,
+            broker,
             sellDate: t.tradeDate,
             quantity: sold,
             proceeds,
@@ -336,7 +346,7 @@ function computeBook(trades) {
     }
 
     if (shares > 0.000001) {
-      positions.push({ symbol, market, currency, shares, avgCost, openedAt });
+      positions.push({ symbol, market, currency, broker, shares, avgCost, openedAt });
     }
   }
 
@@ -352,7 +362,7 @@ const marketValue = (p) => {
 
 /* ---------- 兩種來源合併 ---------- */
 
-const SOURCE_LABEL = { sinopac: "永豐", manual: "手動" };
+const SOURCE_LABEL = { sinopac: "永豐", schwab: "嘉信", manual: "手動" };
 const COND_LABEL = { Cash: "現股", MarginTrading: "融資", ShortSelling: "融券" };
 
 // 永豐給的是券商算好的結果，直接採用，不重算；手動交易則走移動平均法。
@@ -379,7 +389,7 @@ function allPositions() {
     const mv = marketValue(p);
     const q = state.quotes[`${p.market}:${p.symbol}`];
     out.push({
-      source: "manual",
+      source: p.broker,
       symbol: p.symbol,
       market: p.market,
       currency: p.currency,
@@ -418,7 +428,7 @@ function allRealized() {
 
   for (const l of computeBook(state.trades).lots) {
     out.push({
-      source: "manual",
+      source: l.broker,
       symbol: l.symbol,
       market: l.market,
       currency: l.currency,
@@ -515,7 +525,7 @@ function allTransactions() {
     out.push({
       key: `trade:${t.id}`,
       side: t.side,
-      source: "manual",
+      source: t.broker,
       symbol: t.symbol,
       market: t.market,
       currency: t.currency,
@@ -599,6 +609,33 @@ function normalizeRealized(id, d) {
   };
 }
 
+function normalizeOption(id, d) {
+  const expiry = String(d.expiry || "");
+  const status = ["expired", "assigned", "closed"].includes(d.status) ? d.status : "open";
+  return {
+    id,
+    broker: d.broker || "schwab",
+    underlying: String(d.underlying ?? ""),
+    market: d.market || "US",
+    currency: d.currency || "USD",
+    kind: d.kind === "C" ? "C" : "P",
+    side: d.side === "long" ? "long" : "short",
+    strike: Number(d.strike) || 0,
+    expiry,
+    contracts: Number(d.contracts) || 0,
+    openDate: d.openDate || null,
+    closeDate: d.closeDate || null,
+    premium: Number(d.premium) || 0,
+    fee: Number(d.fee) || 0,
+    status,
+    realizedPnl:
+      d.realizedPnl === null || d.realizedPnl === undefined ? null : Number(d.realizedPnl),
+    note: d.note || "",
+    // 過了到期日卻沒有結算紀錄，多半是匯出區間沒涵蓋，不能當成還持有的部位
+    staleOpen: status === "open" && expiry !== "" && expiry < new Date().toISOString().slice(0, 10),
+  };
+}
+
 function normalizeLot(id, d) {
   return {
     id,
@@ -647,6 +684,12 @@ function subscribe() {
   onSnapshot(collection(db, "lots"), (snap) => {
     state.lots = snap.docs.map((d) => normalizeLot(d.id, d.data()));
     state.lots.sort((a, b) => b.tradeDate - a.tradeDate);
+    render();
+  });
+
+  onSnapshot(collection(db, "options"), (snap) => {
+    state.options = snap.docs.map((d) => normalizeOption(d.id, d.data()));
+    state.options.sort((a, b) => (b.openDate || "").localeCompare(a.openDate || ""));
     render();
   });
 
@@ -742,6 +785,232 @@ async function addManualTrade(data) {
 
 async function deleteTrade(id) {
   await deleteDoc(doc(db, "trades", id));
+}
+
+/* ---------- 嘉信匯出檔解析 ---------- */
+
+// Schwab 的 API 這個帳戶申請不到（開發者平台 2FA 只收美國門號），改用網站匯出的 JSON。
+// 以下分類依實際匯出檔 1362 筆逐項確認，不是照文件猜的。
+const SCHWAB_ACTIONS = {
+  buy: new Set(["Buy", "Reinvest Shares"]), // Reinvest Shares 是股利再投入，有股數與價格，就是買進
+  sell: new Set(["Sell"]),
+  dividend: new Set([
+    "Qualified Dividend", "Cash Dividend", "Non-Qualified Div", "Qual Div Reinvest",
+    "Pr Yr Non Qual Div", "Short Term Cap Gain", "Bond Interest", "Credit Interest",
+  ]),
+  // 稅費用負數存進 dividends，加總時自然淨額，不用去跟個別股利配對（日期常對不起來）
+  tax: new Set([
+    "NRA Tax Adj", "ADR Mgmt Fee", "Foreign Tax Paid", "NRA Withholding",
+    "Margin Interest", "Interest Adj", "Pr Yr NRA Tax",
+  ]),
+  optionOpen: new Set(["Sell to Open", "Buy to Open"]),
+  optionClose: new Set(["Expired", "Assigned", "Buy to Close", "Sell to Close"]),
+  // 現金搬移與公司行動，不是交易。Journaled Shares 名字誤導，實測沒有代號也沒有股數，
+  // 內容是 TD Ameritrade 併入嘉信的現金搬移。Expired Rights 是認購權證到期不是選擇權。
+  ignore: new Set([
+    "Journaled Shares", "Internal Transfer", "Journal", "Wire Received",
+    "Reverse Split", "Stock Split", "Stock Split Adj", "Cash In Lieu",
+    "Dist Rights Trans", "Reinvestment Adj", "Expired Rights",
+  ]),
+};
+
+const parseMoney = (v) => {
+  if (v === null || v === undefined || v === "") return 0;
+  const n = parseFloat(String(v).replace(/[$,\s]/g, ""));
+  return isNaN(n) ? 0 : n;
+};
+
+// 選擇權的日期是「07/20/2026 as of 07/17/2026」，as of 後面才是實際發生日
+const parseSchwabDate = (v) => {
+  const text = String(v || "");
+  const part = text.includes(" as of ") ? text.split(" as of ")[1] : text;
+  const m = part.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  return m ? `${m[3]}-${m[1]}-${m[2]}` : null;
+};
+
+const OPTION_SYMBOL_RE = /^(\S+)\s+(\d{2})\/(\d{2})\/(\d{4})\s+([\d.]+)\s+([CP])\b/;
+
+// 實測有一筆 Assigned 的 Symbol 是空字串，合約寫在 Description（「5 TSLL1 12/19/2025 22.00 C」）
+function parseOptionContract(row) {
+  const fromSymbol = OPTION_SYMBOL_RE.exec(String(row.Symbol || "").trim());
+  const desc = String(row.Description || "").trim().replace(/^\d+\s+/, "");
+  const m = fromSymbol || OPTION_SYMBOL_RE.exec(desc);
+  if (!m) return null;
+  return {
+    underlying: m[1],
+    expiry: `${m[4]}-${m[2]}-${m[3]}`,
+    strike: parseFloat(m[5]),
+    kind: m[6],
+  };
+}
+
+const contractKey = (c) => `schwab_${c.underlying}_${c.expiry}_${c.strike}_${c.kind}`;
+
+// 同一筆再匯入一次要落在同一個 doc，不能變兩筆。用內容湊出穩定 id。
+const stableId = (parts) =>
+  parts.map((p) => String(p ?? "").replace(/[^\w.-]/g, "")).join("_");
+
+function parseSchwabExport(json) {
+  const rows = (json && json.BrokerageTransactions) || [];
+  const out = {
+    trades: [], dividends: [], options: [],
+    ignored: 0, ignoredActions: {}, unclassified: [],
+    range: { from: json?.FromDate || "", to: json?.ToDate || "" },
+    total: rows.length,
+  };
+  const contracts = new Map();
+  const optionRows = [];
+
+  for (const row of rows) {
+    const action = String(row.Action || "").trim();
+    const date = parseSchwabDate(row.Date);
+    const symbol = String(row.Symbol || "").trim();
+    const amount = parseMoney(row.Amount);
+    const fee = parseMoney(row["Fees & Comm"]);
+
+    if (SCHWAB_ACTIONS.ignore.has(action)) {
+      out.ignored++;
+      out.ignoredActions[action] = (out.ignoredActions[action] || 0) + 1;
+      continue;
+    }
+
+    if (SCHWAB_ACTIONS.optionOpen.has(action) || SCHWAB_ACTIONS.optionClose.has(action)) {
+      const c = parseOptionContract(row);
+      if (!c || !date) {
+        out.unclassified.push({ action, symbol, date: row.Date, why: "選擇權合約代號無法解析" });
+        continue;
+      }
+      optionRows.push({ contract: c, action, date, row, amount, fee });
+      continue;
+    }
+
+    const isBuy = SCHWAB_ACTIONS.buy.has(action);
+    const isSell = SCHWAB_ACTIONS.sell.has(action);
+    if (isBuy || isSell) {
+      const quantity = Math.abs(parseFloat(row.Quantity) || 0);
+      const price = parseMoney(row.Price);
+      if (!symbol || !date || !quantity) {
+        out.unclassified.push({ action, symbol, date: row.Date, why: "缺少代號、日期或股數" });
+        continue;
+      }
+      const externalId = stableId([date, symbol, isBuy ? "B" : "S", quantity, price, amount]);
+      out.trades.push({
+        broker: "schwab", symbol, market: "US", currency: "USD",
+        side: isBuy ? "buy" : "sell",
+        quantity, price, fee, tax: 0,
+        tradeDate: `${date}T00:00:00Z`,
+        externalId,
+        action,
+      });
+      continue;
+    }
+
+    const isDiv = SCHWAB_ACTIONS.dividend.has(action);
+    const isTax = SCHWAB_ACTIONS.tax.has(action);
+    if (isDiv || isTax) {
+      if (!date) {
+        out.unclassified.push({ action, symbol, date: row.Date, why: "日期無法解析" });
+        continue;
+      }
+      out.dividends.push({
+        broker: "schwab", symbol: symbol || "(現金)", market: "US", currency: "USD",
+        amount, // 稅費本來就是負數，加總自然淨額
+        kind: isTax ? "tax" : action === "Credit Interest" || action === "Bond Interest" ? "interest" : "dividend",
+        payDate: `${date}T00:00:00Z`,
+        externalId: stableId([date, symbol || "CASH", action, amount]),
+        action,
+      });
+      continue;
+    }
+
+    out.unclassified.push({ action, symbol, date: row.Date, why: "未知的交易類型" });
+  }
+
+  // 先建開倉，平倉再回頭配對：標的分割後選擇權代號會被改成調整序列（實測 TSLL 平倉時
+  // 變成 TSLL1），逐列處理會把同一個合約拆成「開倉沒平倉」和「平倉沒開倉」兩筆。
+  for (const { contract, action, date, row, amount, fee } of optionRows) {
+    if (!SCHWAB_ACTIONS.optionOpen.has(action)) continue;
+    const key = contractKey(contract);
+    contracts.set(key, {
+      ...contract, id: key, broker: "schwab", market: "US", currency: "USD",
+      side: action === "Sell to Open" ? "short" : "long",
+      contracts: Math.abs(parseFloat(row.Quantity) || 0),
+      premium: amount, // 賣方為正、買方為負，已含手續費
+      fee,
+      status: "open", openDate: date, closeDate: null, realizedPnl: null,
+    });
+  }
+
+  // 只在完全比對不到時才去掉標的尾碼數字再試一次，避免誤傷本來就以數字結尾的代號
+  const matchAdjusted = (c) => {
+    const base = c.underlying.replace(/\d+$/, "");
+    if (base === c.underlying) return null;
+    const key = contractKey({ ...c, underlying: base });
+    return contracts.has(key) ? key : null;
+  };
+
+  for (const { contract, action, date, row } of optionRows) {
+    if (SCHWAB_ACTIONS.optionOpen.has(action)) continue;
+    const exact = contractKey(contract);
+    const key = contracts.has(exact) ? exact : matchAdjusted(contract) || exact;
+    const existing = contracts.get(key) || {
+      ...contract, id: exact, broker: "schwab", market: "US", currency: "USD",
+      side: "short", contracts: 0, premium: 0, fee: 0,
+      status: "open", openDate: null, closeDate: null, realizedPnl: null,
+    };
+    existing.status = action === "Assigned" ? "assigned" : action === "Expired" ? "expired" : "closed";
+    existing.closeDate = date;
+    if (!existing.contracts) existing.contracts = Math.abs(parseFloat(row.Quantity) || 0);
+    contracts.set(key, existing);
+  }
+
+  for (const c of contracts.values()) {
+    // 到期作廢或被指派，權利金就是這個合約的損益。被指派時標的的買賣另有一筆 Buy/Sell
+    // 紀錄（實測確認），成本由那筆承擔，這裡再合成一次會重複計算。
+    if (c.status !== "open") c.realizedPnl = c.premium;
+    // 早就過期卻沒有平倉紀錄，通常是匯出區間沒涵蓋到那次結算，標記出來而不是當成還持有
+    c.staleOpen = c.status === "open" && c.expiry < new Date().toISOString().slice(0, 10);
+    out.options.push(c);
+  }
+  out.options.sort((a, b) => String(b.openDate || "").localeCompare(String(a.openDate || "")));
+  return out;
+}
+
+// Firestore 單批上限 500 筆，這份匯出檔會產生上千份文件
+const BATCH_LIMIT = 450;
+
+async function commitInBatches(writes, onProgress) {
+  let done = 0;
+  for (let i = 0; i < writes.length; i += BATCH_LIMIT) {
+    const batch = writeBatch(db);
+    for (const w of writes.slice(i, i + BATCH_LIMIT)) batch.set(w.ref, w.data, { merge: true });
+    await batch.commit();
+    done += Math.min(BATCH_LIMIT, writes.length - i);
+    if (onProgress) onProgress(done, writes.length);
+  }
+  return done;
+}
+
+async function importSchwab(parsed, onProgress) {
+  const syncedAt = new Date().toISOString();
+  const writes = [];
+
+  for (const t of parsed.trades) {
+    const { action, ...data } = t;
+    // note 是使用者自己寫的，重新匯入不可覆寫，所以不放進 payload
+    writes.push({ ref: doc(db, "trades", `schwab_${t.externalId}`), data: { ...data, syncedAt } });
+  }
+  for (const d of parsed.dividends) {
+    const { action, ...data } = d;
+    writes.push({ ref: doc(db, "dividends", `schwab_${d.externalId}`), data: { ...data, syncedAt } });
+  }
+  for (const o of parsed.options) {
+    const { id, staleOpen, ...data } = o;
+    writes.push({ ref: doc(db, "options", id), data: { ...data, syncedAt } });
+  }
+
+  await commitInBatches(writes, onProgress);
+  return writes.length;
 }
 
 /* ---------- charts ---------- */
@@ -1161,7 +1430,7 @@ function tradeRow(t) {
       ]),
       el("div", {
         class: "row-sub",
-        text: `${fmtDate(t.tradeDate)} · ${brokerLabel[t.broker] || t.broker} · ${fmtNum(t.quantity, 0)} 股 @ ${fmtNum(t.price)}`,
+        text: `${fmtDate(t.tradeDate)} · ${brokerLabel[t.broker] || t.broker} · ${fmtShares(t.quantity)} 股 @ ${fmtNum(t.price)}`,
       }),
     ]),
     el("div", { class: "row-right" }, [
@@ -1194,7 +1463,7 @@ function positionRow(p) {
   const pct = u !== null && p.totalCost ? (u / p.totalCost) * 100 : null;
 
   const subs = [
-    subLine([`${p.shares === null ? "—" : fmtNum(p.shares, 0)} 股`, `均價 ${fmtNum(p.avgCost)}`]),
+    subLine([`${p.shares === null ? "—" : fmtShares(p.shares)} 股`, `均價 ${fmtNum(p.avgCost)}`]),
     subLine([
       `成本 ${fmtMoney(p.totalCost, p.currency)}`,
       p.marketValue === null ? null : `市值 ${fmtMoney(p.marketValue, p.currency)}`,
@@ -1213,8 +1482,9 @@ function positionRow(p) {
     );
   }
 
+  // 只有永豐部位的現價是同步寫進來的，其餘（手動、嘉信匯入）都沒有自動來源，要能手填
   const priceNode =
-    p.source === "manual"
+    p.source !== "sinopac"
       ? el("input", {
           class: "price-input mono",
           type: "number",
@@ -1238,7 +1508,7 @@ function positionRow(p) {
         el("div", { class: "row-title" }, [
           el("span", { class: "mono", text: p.symbol }),
           el("span", { class: "label-pill", text: p.market }),
-          el("span", { class: `label-pill src-${p.source}`, text: SOURCE_LABEL[p.source] }),
+          el("span", { class: `label-pill src-${p.source}`, text: SOURCE_LABEL[p.source] || p.source }),
           p.cond && p.cond !== "Cash"
             ? el("span", { class: "label-pill", text: COND_LABEL[p.cond] || p.cond })
             : null,
@@ -1269,13 +1539,13 @@ function viewPositions() {
     return frag;
   }
 
-  const missing = positions.filter((p) => p.source === "manual" && p.marketValue === null);
+  const missing = positions.filter((p) => p.source !== "sinopac" && p.marketValue === null);
 
   if (missing.length) {
     frag.appendChild(
       el("div", {
         class: "flash",
-        text: `${missing.length} 檔手動部位缺現價，填入右側欄位才算得出未實現損益（台股由同步自動寫入）。`,
+        text: `${missing.length} 檔部位缺現價，填入右側欄位才算得出未實現損益（永豐台股由同步自動寫入，美股沒有自動來源）。`,
       })
     );
   }
@@ -1293,7 +1563,7 @@ function ledgerRow(tx) {
   // lots 是張數，零股一律回報 0，不能顯示成「0 張」讓人以為沒成交；數量以金額為準
   if (tx.lots > 0) parts.push(`${fmtNum(tx.lots, 0)} 張`);
   else if (tx.source === "sinopac") parts.push("零股");
-  if (tx.shares !== null) parts.push(`${fmtNum(tx.shares, 0)} 股`);
+  if (tx.shares !== null) parts.push(`${fmtShares(tx.shares)} 股`);
   if (tx.unitPrice) parts.push(`@ ${fmtNum(tx.unitPrice)}`);
   if (tx.costBasis !== null) parts.push(`成本 ${fmtMoney(tx.costBasis, tx.currency)}`);
   if (tx.fee) parts.push(`費 ${fmtNum(tx.fee, 0)}`);
@@ -1317,7 +1587,7 @@ function ledgerRow(tx) {
         el("span", { class: "mono", text: tx.symbol }),
         el("span", { class: "label-pill", text: tx.market }),
         el("span", { class: `label-pill ${tx.side}`, text: tx.side === "buy" ? "買" : "賣" }),
-        el("span", { class: `label-pill src-${tx.source}`, text: SOURCE_LABEL[tx.source] }),
+        el("span", { class: `label-pill src-${tx.source}`, text: SOURCE_LABEL[tx.source] || tx.source }),
       ]),
       subLine(parts),
     ]),
@@ -1418,7 +1688,23 @@ function viewLedger() {
     onclick: () => toggleTradeForm(),
   });
 
+  const importBtn = el("button", {
+    class: "btn btn-sm",
+    text: "匯入嘉信",
+    onclick: () => document.getElementById("schwabFile").click(),
+  });
+
+  const headerActions = el("div", { style: "display:flex;gap:8px" }, [importBtn, addBtn]);
+
   const form = el("div", { class: "box-body hidden", id: "tradeForm" }, [buildTradeForm()]);
+  const importPanel = el("div", { class: "box-body hidden", id: "importPanel" });
+  const fileInput = el("input", {
+    type: "file",
+    id: "schwabFile",
+    accept: ".json,application/json",
+    class: "hidden",
+    onchange: (ev) => handleSchwabFile(ev.target.files[0]),
+  });
 
   const body = shown.length
     ? shown.map(ledgerRow)
@@ -1433,11 +1719,107 @@ function viewLedger() {
   frag.appendChild(
     box(
       "交易紀錄",
-      [filters, form, ...body, ...(filtered.length ? [el("div", { class: "box-body" }, [pager])] : [])],
-      addBtn
+      [
+        fileInput, filters, importPanel, form, ...body,
+        ...(filtered.length ? [el("div", { class: "box-body" }, [pager])] : []),
+      ],
+      headerActions
     )
   );
   return frag;
+}
+
+async function handleSchwabFile(file) {
+  const panel = document.getElementById("importPanel");
+  if (!file || !panel) return;
+  panel.classList.remove("hidden");
+  panel.replaceChildren(el("div", { class: "row-sub", text: `讀取 ${file.name}…` }));
+
+  let parsed;
+  try {
+    // 整份檔案只在瀏覽器裡解析，不會上傳到任何伺服器
+    parsed = parseSchwabExport(JSON.parse(await file.text()));
+  } catch (err) {
+    panel.replaceChildren(
+      el("div", { class: "flash", text: `這個檔案讀不出來：${err.message}。請確認是從嘉信網站「輸出交易數據」選 JSON 匯出的原始檔。` })
+    );
+    return;
+  }
+  renderImportPreview(panel, parsed, file.name);
+}
+
+function renderImportPreview(panel, parsed, filename) {
+  const buys = parsed.trades.filter((t) => t.side === "buy").length;
+  const income = parsed.dividends.filter((d) => d.kind !== "tax");
+  const taxes = parsed.dividends.filter((d) => d.kind === "tax");
+  const sum = (list) => list.reduce((s, d) => s + d.amount, 0);
+  const closed = parsed.options.filter((o) => o.status !== "open");
+  const stale = parsed.options.filter((o) => o.staleOpen);
+
+  const rows = [
+    ["買賣", `${parsed.trades.length} 筆`, `買 ${buys} · 賣 ${parsed.trades.length - buys}（含股利再投入的買進）`],
+    ["股利/利息", `${income.length} 筆`, fmtMoney(sum(income), "USD", 2)],
+    ["稅費", `${taxes.length} 筆`, `${fmtMoney(sum(taxes), "USD", 2)}（已從股利淨額扣除）`],
+    ["選擇權合約", `${parsed.options.length} 個`, `已結束 ${closed.length} · 權利金 ${fmtMoney(closed.reduce((s, o) => s + o.realizedPnl, 0), "USD", 2)}`],
+    ["忽略", `${parsed.ignored} 筆`, Object.entries(parsed.ignoredActions).map(([k, v]) => `${k} ${v}`).join("、")],
+  ];
+
+  const table = el("div", {}, rows.map(([label, value, note]) =>
+    el("div", { class: "box-row", style: "padding:8px 0" }, [
+      el("div", { class: "row-main" }, [
+        el("div", { class: "row-title" }, [el("span", { text: label })]),
+        el("div", { class: "row-sub", text: note }),
+      ]),
+      el("div", { class: "row-right mono", text: value }),
+    ])
+  ));
+
+  const status = el("div", { class: "row-sub", style: "margin-top:10px" });
+
+  const confirmBtn = el("button", {
+    class: "btn btn-primary",
+    text: "確認匯入",
+    onclick: async () => {
+      confirmBtn.disabled = true;
+      try {
+        const n = await importSchwab(parsed, (done, total) => {
+          status.textContent = `寫入中… ${done} / ${total}`;
+        });
+        status.textContent = `完成，共寫入 ${n} 筆。重複匯入同一份不會產生重複資料。`;
+        confirmBtn.remove();
+      } catch (err) {
+        status.textContent = `寫入失敗：${err.message}`;
+        confirmBtn.disabled = false;
+      }
+    },
+  });
+
+  const children = [
+    el("div", { class: "row-title", text: `匯入預覽：${filename}` }),
+    el("div", { class: "row-sub", text: `${parsed.range.from} ~ ${parsed.range.to}，共 ${parsed.total} 列` }),
+    table,
+  ];
+
+  if (stale.length) {
+    children.push(el("div", {
+      class: "flash",
+      text: `${stale.length} 個合約已過到期日但匯出檔裡沒有結算紀錄，會標成「無結算紀錄」而不是當成現有部位。`,
+    }));
+  }
+  if (parsed.unclassified.length) {
+    children.push(el("div", { class: "flash", text: `${parsed.unclassified.length} 列無法辨識，不會匯入：` }));
+    children.push(el("div", { class: "row-sub" },
+      parsed.unclassified.slice(0, 10).map((u) =>
+        el("div", { text: `${u.date} ${u.action} ${u.symbol} — ${u.why}` }))));
+  }
+
+  children.push(el("div", { style: "display:flex;gap:8px;margin-top:12px" }, [
+    confirmBtn,
+    el("button", { class: "btn", text: "取消", onclick: () => panel.classList.add("hidden") }),
+  ]));
+  children.push(status);
+
+  panel.replaceChildren(...children);
 }
 
 function toggleTradeForm() {
@@ -1549,7 +1931,7 @@ function openTradeDetail(t) {
         el("div", { class: "stat-grid" }, [
           statTile("代號", t.symbol, `${t.market} · ${brokerLabel[t.broker] || t.broker}`),
           statTile("買賣", t.side === "buy" ? "買進" : "賣出", fmtDate(t.tradeDate)),
-          statTile("股數", fmtNum(t.quantity, 0), `@ ${fmtNum(t.price)}`),
+          statTile("股數", fmtShares(t.quantity), `@ ${fmtNum(t.price)}`),
           statTile("成交金額", fmtMoney(t.quantity * t.price, t.currency), `費用 ${fmtNum(t.fee + t.tax, 0)}`),
         ]),
         el("div", { class: "field" }, [el("label", { text: "備註" }), noteInput]),
@@ -1564,7 +1946,7 @@ function openTradeDetail(t) {
 
 function realizedRow(l) {
   const parts = [fmtDate(l.sellDate)];
-  if (l.quantity !== null) parts.push(`${fmtNum(l.quantity, 0)} 股`);
+  if (l.quantity !== null) parts.push(`${fmtShares(l.quantity)} 股`);
   parts.push(`成本 ${fmtMoney(l.costBasis, l.currency)}`);
   if (l.proceeds !== null) parts.push(`收 ${fmtMoney(l.proceeds, l.currency)}`);
   else if (l.sellPrice) parts.push(`賣價 ${fmtNum(l.sellPrice)}`);
@@ -1576,7 +1958,7 @@ function realizedRow(l) {
       el("div", { class: "row-title" }, [
         el("span", { class: "mono", text: l.symbol }),
         el("span", { class: "label-pill", text: l.market }),
-        el("span", { class: `label-pill src-${l.source}`, text: SOURCE_LABEL[l.source] }),
+        el("span", { class: `label-pill src-${l.source}`, text: SOURCE_LABEL[l.source] || l.source }),
       ]),
       subLine(parts),
     ]),
@@ -2170,10 +2552,91 @@ function viewReport() {
 
 /* ---------- router ---------- */
 
+const OPTION_STATUS_LABEL = { open: "未平倉", expired: "到期作廢", assigned: "被指派", closed: "已平倉" };
+
+function optionRow(o) {
+  const days = o.expiry
+    ? Math.ceil((new Date(`${o.expiry}T00:00:00`).getTime() - Date.now()) / DAY_MS)
+    : null;
+  const parts = [
+    `${o.side === "short" ? "賣出" : "買進"} ${fmtNum(o.contracts, 0)} 口`,
+    `履約 ${fmtNum(o.strike)}`,
+    `到期 ${o.expiry}`,
+  ];
+  if (o.openDate) parts.push(`開倉 ${o.openDate}`);
+  if (o.closeDate) parts.push(`${OPTION_STATUS_LABEL[o.status]} ${o.closeDate}`);
+  if (o.status === "open" && !o.staleOpen && days !== null) parts.push(`剩 ${days} 天`);
+
+  return el("div", { class: "box-row" }, [
+    symbolIcon(o.underlying, o.market),
+    el("div", { class: "row-main" }, [
+      el("div", { class: "row-head" }, [
+        el("div", { class: "row-title" }, [
+          el("span", { class: "mono", text: o.underlying }),
+          el("span", { class: `label-pill ${o.kind === "P" ? "sell" : "buy"}`, text: o.kind === "P" ? "賣權" : "買權" }),
+          o.staleOpen ? el("span", { class: "label-pill", text: "無結算紀錄" }) : null,
+        ]),
+        el("div", { class: "row-head-right" }, [
+          el("div", {
+            class: `mono ${o.realizedPnl === null ? "muted" : pnlClass(o.realizedPnl)}`,
+            text: o.realizedPnl === null ? fmtMoney(o.premium, o.currency, 2) : fmtMoney(o.realizedPnl, o.currency, 2),
+          }),
+          el("div", { class: "row-sub", text: o.realizedPnl === null ? "權利金（未結算）" : OPTION_STATUS_LABEL[o.status] }),
+        ]),
+      ]),
+      subLine(parts),
+    ]),
+  ]);
+}
+
+function viewOptionsScreen() {
+  // 選擇權都是美股，台股視角下不該出現
+  const all = viewOptions.market === "TW" ? [] : state.options;
+  const frag = document.createDocumentFragment();
+  frag.appendChild(marketBar());
+
+  if (!all.length) {
+    frag.appendChild(box("選擇權", filteredBlank("尚無選擇權紀錄", "從交易紀錄頁匯入嘉信的交易數據後會出現在這裡")));
+    return frag;
+  }
+
+  const open = all.filter((o) => o.status === "open" && !o.staleOpen);
+  const stale = all.filter((o) => o.staleOpen);
+  const closed = all.filter((o) => o.status !== "open");
+  const premium = closed.reduce((s, o) => s + (o.realizedPnl || 0), 0);
+  const wins = closed.filter((o) => (o.realizedPnl || 0) > 0).length;
+
+  frag.appendChild(
+    el("div", { class: "stat-grid" }, [
+      statTile("已結算權利金", fmtMoney(premium, "USD", 2), `${closed.length} 個合約`, pnlClass(premium)),
+      statTile("未平倉", String(open.length), open.length ? "見下方到期日" : "目前沒有"),
+      statTile("到期作廢比例", closed.length ? `${fmtNum((wins / closed.length) * 100, 0)}%` : "—", "權利金留下的比例"),
+    ])
+  );
+
+  if (open.length) frag.appendChild(box("未平倉合約", open.map(optionRow)));
+  if (closed.length) frag.appendChild(box("已結算", closed.map(optionRow)));
+  if (stale.length) {
+    frag.appendChild(
+      box("無結算紀錄", [
+        el("div", { class: "box-body" }, [
+          el("div", {
+            class: "row-sub",
+            text: "這些合約已過到期日，但匯出檔裡找不到結算紀錄（通常是匯出區間沒涵蓋到）。沒有把它們當成現有部位，權利金也沒計入已結算金額。",
+          }),
+        ]),
+        ...stale.map(optionRow),
+      ])
+    );
+  }
+  return frag;
+}
+
 const ROUTES = {
   "/": viewDashboard,
   "/positions": viewPositions,
   "/ledger": viewLedger,
+  "/options": viewOptionsScreen,
   "/realized": viewRealized,
   "/chart": viewChart,
   "/exposure": viewExposure,
