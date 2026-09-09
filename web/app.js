@@ -2016,7 +2016,7 @@ function viewSettings() {
   }
 
   const status = el("div", { class: "row-sub", style: "margin-top:8px" });
-  const input = el("input", { type: "email", placeholder: "her@example.com", id: "allowEmail" });
+  const input = el("input", { type: "email", id: "allowEmail" });
 
   const addBtn = el("button", {
     class: "btn btn-sm btn-primary",
@@ -2071,9 +2071,6 @@ function viewSettings() {
       el("div", { class: "box-body" }, [
         el("div", { class: "row-sub" }, [
           "任何人都能在登入頁註冊帳號，但只有名單上的 Email 讀寫得到資料，其他人登入後會看到「尚未開通」。",
-        ]),
-        el("div", { class: "row-sub", style: "margin-top:6px" }, [
-          "先把她的 Email 加進來，她再自己註冊、自己設密碼，你不會經手她的密碼。每個人的交易資料各自獨立，你們互相看不到對方的。",
         ]),
         el("div", { class: "field", style: "margin-top:12px" }, [
           el("label", { text: "Email" }),
