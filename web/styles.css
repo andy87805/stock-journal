@@ -79,19 +79,25 @@ a:hover {
   text-decoration: underline;
 }
 
-/* header */
+/* header + 分頁列：一起 sticky，不然兩個各自 top:0 會互相遮蓋 */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
 
 .app-header {
   background: var(--header-bg);
   color: var(--header-fg);
   padding: 12px 16px;
-  padding-top: max(12px, env(safe-area-inset-top));
+  /* iOS 在畫面頂端會對狀態列底下的內容做一層毛玻璃，緊貼安全區邊界的東西會被糊掉。
+     所以除了 safe-area 之外再多留一段，讓標題與按鈕完全離開那條帶狀區域。
+     沒有安全區的裝置（桌機）env() 回退成 0，等於單純的 20px 內距。 */
+  padding-top: calc(env(safe-area-inset-top, 0px) + 20px);
   display: flex;
   align-items: center;
   gap: 10px;
-  position: sticky;
-  top: 0;
-  z-index: 20;
 }
 
 /* 標誌的紅綠藍是照 PWA 桌面圖示寫死在 SVG 裡的，不跟著主題變色 */
@@ -137,9 +143,6 @@ a:hover {
   background: var(--canvas);
   overflow-x: auto;
   scrollbar-width: none;
-  position: sticky;
-  top: 0;
-  z-index: 10;
   -webkit-overflow-scrolling: touch;
   /* 右緣淡出，提示還可以往右滑（分頁數量超出螢幕寬度） */
   mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent 100%);

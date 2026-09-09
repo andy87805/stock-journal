@@ -3085,8 +3085,7 @@ function initAuth() {
     const active = !!user && session.allowed;
     gate.classList.toggle("hidden", !!user);
     pendingBox.classList.toggle("hidden", !user || session.allowed);
-    document.getElementById("appHeader").classList.toggle("hidden", !active);
-    document.getElementById("tabnav").classList.toggle("hidden", !active);
+    document.getElementById("topbar").classList.toggle("hidden", !active);
     document.getElementById("view").classList.toggle("hidden", !active);
     if (settingsTab) settingsTab.classList.toggle("hidden", !session.owner);
 

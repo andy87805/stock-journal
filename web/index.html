@@ -116,46 +116,50 @@
       </div>
     </div>
 
-    <header class="app-header hidden" id="appHeader">
-      <svg class="logo" height="22" viewBox="0 0 16 16" width="22" aria-hidden="true">
-        <g fill="#3fb950">
-          <rect x="5.26" y="7.68" width="0.35" height="4.48" rx="0.17"></rect>
-          <rect x="4.84" y="8.64" width="1.2" height="2.56" rx="0.3"></rect>
-        </g>
-        <g fill="#f85149">
-          <rect x="7.82" y="5.44" width="0.35" height="5.12" rx="0.17"></rect>
-          <rect x="7.4" y="6.4" width="1.2" height="3.2" rx="0.3"></rect>
-          <rect x="10.38" y="3.52" width="0.35" height="4.8" rx="0.17"></rect>
-          <rect x="9.96" y="4.48" width="1.2" height="2.88" rx="0.3"></rect>
-        </g>
-        <g fill="none" stroke="#2f81f7" stroke-width="0.56" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3.84 10.88 L6.4 8.96 L8.96 7.04 L12.16 4.16"></path>
-        </g>
-        <g fill="#2f81f7">
-          <circle cx="3.84" cy="10.88" r="0.48"></circle>
-          <circle cx="12.16" cy="4.16" r="0.48"></circle>
-        </g>
-      </svg>
-      <div class="title">stock<span>-journal</span></div>
-      <span class="sync-badge" id="syncBadge">—</span>
-      <button class="icon-btn" id="themeBtn" title="切換佈景">◐</button>
-      <button class="icon-btn" id="signOutBtn" title="登出">⏻</button>
-    </header>
+    <!-- header 與分頁列包在同一個 sticky 容器。分開各自 sticky top:0 的話兩個會停在
+         同一個位置，分頁列被 header 蓋住就再也點不到。 -->
+    <div class="topbar hidden" id="topbar">
+      <header class="app-header" id="appHeader">
+        <svg class="logo" height="22" viewBox="0 0 16 16" width="22" aria-hidden="true">
+          <g fill="#3fb950">
+            <rect x="5.26" y="7.68" width="0.35" height="4.48" rx="0.17"></rect>
+            <rect x="4.84" y="8.64" width="1.2" height="2.56" rx="0.3"></rect>
+          </g>
+          <g fill="#f85149">
+            <rect x="7.82" y="5.44" width="0.35" height="5.12" rx="0.17"></rect>
+            <rect x="7.4" y="6.4" width="1.2" height="3.2" rx="0.3"></rect>
+            <rect x="10.38" y="3.52" width="0.35" height="4.8" rx="0.17"></rect>
+            <rect x="9.96" y="4.48" width="1.2" height="2.88" rx="0.3"></rect>
+          </g>
+          <g fill="none" stroke="#2f81f7" stroke-width="0.56" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3.84 10.88 L6.4 8.96 L8.96 7.04 L12.16 4.16"></path>
+          </g>
+          <g fill="#2f81f7">
+            <circle cx="3.84" cy="10.88" r="0.48"></circle>
+            <circle cx="12.16" cy="4.16" r="0.48"></circle>
+          </g>
+        </svg>
+        <div class="title">stock<span>-journal</span></div>
+        <span class="sync-badge" id="syncBadge">—</span>
+        <button class="icon-btn" id="themeBtn" title="切換佈景">◐</button>
+        <button class="icon-btn" id="signOutBtn" title="登出">⏻</button>
+      </header>
 
-    <nav class="tabnav hidden" id="tabnav">
-      <a href="#/" data-route="/">總覽</a>
-      <a href="#/positions" data-route="/positions">持股</a>
-      <a href="#/ledger" data-route="/ledger">交易紀錄</a>
-      <a href="#/realized" data-route="/realized">已實現</a>
-      <a href="#/options" data-route="/options">選擇權</a>
-      <a href="#/chart" data-route="/chart">損益走勢</a>
-      <a href="#/exposure" data-route="/exposure">曝險</a>
-      <a href="#/stats" data-route="/stats">統計</a>
-      <a href="#/dividends" data-route="/dividends">股利</a>
-      <a href="#/reminders" data-route="/reminders">提醒</a>
-      <a href="#/report" data-route="/report">報表</a>
-      <a href="#/settings" data-route="/settings" class="hidden">設定</a>
-    </nav>
+      <nav class="tabnav" id="tabnav">
+        <a href="#/" data-route="/">總覽</a>
+        <a href="#/positions" data-route="/positions">持股</a>
+        <a href="#/ledger" data-route="/ledger">交易紀錄</a>
+        <a href="#/realized" data-route="/realized">已實現</a>
+        <a href="#/options" data-route="/options">選擇權</a>
+        <a href="#/chart" data-route="/chart">損益走勢</a>
+        <a href="#/exposure" data-route="/exposure">曝險</a>
+        <a href="#/stats" data-route="/stats">統計</a>
+        <a href="#/dividends" data-route="/dividends">股利</a>
+        <a href="#/reminders" data-route="/reminders">提醒</a>
+        <a href="#/report" data-route="/report">報表</a>
+        <a href="#/settings" data-route="/settings" class="hidden">設定</a>
+      </nav>
+    </div>
 
     <main id="view" class="hidden"></main>
 

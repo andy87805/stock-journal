@@ -1,5 +1,5 @@
 // 快取名稱改動會觸發重新安裝並清掉舊快取。改了 app 殼層的快取策略時記得換版號。
-const CACHE = "stock-journal-v3";
+const CACHE = "stock-journal-v5";
 
 // 每次部署都會變的檔案：一律先走網路，離線才回退快取。
 // 之前這些是 cache-first，導致改版後使用者永遠看到舊版（sw.js 沒變就不會重新安裝，
