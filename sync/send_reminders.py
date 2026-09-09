@@ -116,10 +116,34 @@ def build_email(events, days):
     return subject, "\n".join(lines)
 
 
-def send_email(subject, body):
-    sender = os.environ["SENDER_EMAIL"]
-    password = os.environ["GMAIL_APP_PASSWORD"]
-    recipient = os.environ["RECIPIENT_EMAIL"]
+def mail_config():
+    """回傳寄信需要的三個值，任一個沒設就回 None。
+
+    「沒設定寄信」跟「寄信失敗」要分開處理：沒設定是還沒配好，不該讓整個
+    同步變成紅色失敗（實測過一次：GitHub Actions 上缺 secret 會是空字串而不是
+    沒有這個環境變數，所以 os.environ[...] 不會噴 KeyError，而是拿空帳號去
+    登入 SMTP 然後認證失敗，錯誤訊息看起來跟密碼打錯一模一樣）。
+    真的設了卻寄不出去，那就該失敗。
+    """
+    sender = os.environ.get("SENDER_EMAIL", "").strip()
+    password = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
+    recipient = os.environ.get("RECIPIENT_EMAIL", "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("SENDER_EMAIL", sender),
+            ("GMAIL_APP_PASSWORD", password),
+            ("RECIPIENT_EMAIL", recipient),
+        )
+        if not value
+    ]
+    if missing:
+        return None, missing
+    return (sender, password, recipient), []
+
+
+def send_email(subject, body, config):
+    sender, password, recipient = config
     smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.environ.get("SMTP_PORT", 465))
 
@@ -164,7 +188,17 @@ def main():
         return
 
     subject, body = build_email(events, args.days)
-    send_email(subject, body)
+
+    config, missing = mail_config()
+    if config is None:
+        # 沒配好寄信就不要把整個同步弄成失敗，但也不要讓內容消失，印到 log 裡
+        print(f"[send_reminders] 沒有設定 {', '.join(missing)}，不寄信。內容如下：")
+        print(f"Subject: {subject}")
+        print()
+        print(body)
+        return
+
+    send_email(subject, body, config)
     print(f"[send_reminders] 已寄出提醒信，共 {len(events)} 筆事件")
 
 

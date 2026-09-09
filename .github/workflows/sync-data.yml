@@ -85,8 +85,11 @@ jobs:
       # 這個 workflow 一天跑兩次（台股收盤 + 美股收盤），提醒信只在台股那一輪寄，避免一天兩封
       - name: Send calendar reminders (除權息/財報提醒信)
         id: reminders
+        # 寄信的三個 secret 缺任一個就整步跳過。之前只檢查 RECIPIENT_EMAIL，
+        # 結果沒設寄件帳號時會拿空帳號去登入 SMTP、認證失敗，讓整個 job 變紅。
         if: >-
           steps.gate.outputs.configured == 'true' && env.RECIPIENT_EMAIL != '' &&
+          env.SENDER_EMAIL != '' && env.GMAIL_APP_PASSWORD != '' &&
           (github.event_name == 'workflow_dispatch' || github.event.schedule == '35 5 * * 1-5')
         continue-on-error: true
         run: python sync/send_reminders.py
