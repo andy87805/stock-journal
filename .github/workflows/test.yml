@@ -1,0 +1,28 @@
+name: Check application logic
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "sync/**"
+      - "tests/**"
+      - "firestore.rules"
+      - ".github/workflows/**"
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: node --input-type=module --check < web/app.js
+      - run: node --test tests/web.test.mjs
+      - run: python -B -m unittest discover -s tests -p "test_*.py"
+      - run: python -B -c "import ast,pathlib; [ast.parse(p.read_text(encoding='utf-8-sig'),filename=str(p)) for p in pathlib.Path('sync').glob('*.py')]"

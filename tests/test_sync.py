@@ -1,0 +1,57 @@
+"""Pure synthetic checks; no Firebase, broker login, email or network."""
+import ast
+import pathlib
+import unittest
+from datetime import date, datetime, timedelta
+from types import SimpleNamespace
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+def functions(path, names):
+    tree = ast.parse((ROOT / path).read_text(encoding="utf-8-sig"))
+    tree.body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    namespace = dict(date=date, datetime=datetime, timedelta=timedelta, MARKET="TW", CURRENCY="TWD", WINDOW_DAYS=364)
+    exec(compile(tree, path, "exec"), namespace)
+    return namespace
+
+class SyncTests(unittest.TestCase):
+    def setUp(self):
+        self.ns = functions("sync/shioaji_sync.py", {"_f", "_date_str", "build_positions", "weighted_entry_date", "_build_realized_window", "build_realized"})
+
+    def test_missing_position_details_stop_update(self):
+        api = SimpleNamespace(
+            list_positions=lambda account: [SimpleNamespace(code="TEST", price=100, pnl=20, id=1)],
+            list_position_detail=lambda account, id: [],
+        )
+        with self.assertRaises(RuntimeError):
+            self.ns["build_positions"](api, None)
+
+    def test_missing_realized_details_stop_update(self):
+        api = SimpleNamespace(
+            list_profit_loss=lambda *args: [SimpleNamespace(code="TEST", date="2026-01-01", dseq="test", id=1)],
+            list_profit_loss_detail=lambda *args: [],
+        )
+        with self.assertRaises(RuntimeError):
+            self.ns["_build_realized_window"](api, None, date(2026, 1, 1), date(2026, 1, 2))
+
+    def test_undated_position_preserves_cost_and_unknown_date(self):
+        api = SimpleNamespace(
+            list_positions=lambda account: [SimpleNamespace(code="TEST", price=100, pnl=20, id=1)],
+            list_position_detail=lambda *args: [SimpleNamespace(price=1000, date=None)],
+        )
+        positions, quotes, lots = self.ns["build_positions"](api, None)
+        self.assertEqual(positions[0]["totalCost"], 1000)
+        self.assertIsNone(lots[0]["tradeDate"])
+
+    def test_date_windows_cover_final_day_without_overlap(self):
+        windows = []
+        self.ns["_build_realized_window"] = lambda api, account, start, end: (windows.append((start, end)) or ([], []))
+        start, end = date(2024, 1, 1), date(2026, 1, 1)
+        self.ns["build_realized"](None, None, start, end)
+        self.assertEqual(windows[0][0], start)
+        self.assertEqual(windows[-1][1], end)
+        for left, right in zip(windows, windows[1:]):
+            self.assertEqual(left[1] + timedelta(days=1), right[0])
+
+if __name__ == "__main__":
+    unittest.main()

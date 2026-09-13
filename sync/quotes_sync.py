@@ -132,7 +132,10 @@ def main():
         if failed:
             # 抓不到就讓前端顯示「未估值」，不要拿舊價充數
             print(f"[quotes_sync] 抓不到現價（維持未估值）: {', '.join(failed)}")
-        set_sync_meta_all(db, BROKER, True, None)
+        set_sync_meta_all(db, BROKER, not failed,
+                          f"{len(failed)} 檔報價未更新，請檢查報價時間" if failed else None)
+        if symbols and not ok:
+            raise RuntimeError("全部報價來源失敗，未更新任何報價")
     except Exception as exc:
         set_sync_meta_all(db, BROKER, False, f"{type(exc).__name__}: {exc}")
         raise

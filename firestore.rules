@@ -31,7 +31,8 @@ service cloud.firestore {
     function isAllowed() {
       return request.auth != null && (
         isOwner() ||
-        exists(/databases/$(database)/documents/allowlist/$(request.auth.token.email))
+        (request.auth.token.email_verified == true &&
+         exists(/databases/$(database)/documents/allowlist/$(request.auth.token.email)))
       );
     }
 
@@ -50,7 +51,7 @@ service cloud.firestore {
     // 寫入基本上都由同步腳本走 Admin SDK 完成（繞過這裡的規則）。
     match /quotes/{quoteId} {
       // 現價要留給前端寫：債券 CUSIP、下市股這種抓不到報價的要能手動補
-      allow read, write: if isAllowed();
+      allow read: if isAllowed();
     }
 
     match /symbols/{symbolId} {

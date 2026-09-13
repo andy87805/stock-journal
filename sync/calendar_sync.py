@@ -60,11 +60,12 @@ def collect_symbols(db):
 
     tw_symbols, us_symbols = set(), set()
     buckets = {"TW": tw_symbols, "US": us_symbols}
-    for doc in scan_all_users(db, "trades"):
-        row = doc.to_dict()
-        bucket = buckets.get(row.get("market"))
-        if bucket is not None and row.get("symbol"):
-            bucket.add(row["symbol"])
+    for collection in ("trades", "positions"):
+        for doc in scan_all_users(db, collection):
+            row = doc.to_dict()
+            bucket = buckets.get(row.get("market"))
+            if bucket is not None and row.get("symbol"):
+                bucket.add(row["symbol"])
     return tw_symbols, us_symbols
 
 
@@ -137,20 +138,27 @@ def main():
         tw_symbols, us_symbols = collect_symbols(db)
 
         events = []
+        errors = []
         try:
             events += fetch_tw_ex_dividend_events(tw_symbols)
         except Exception as e:
+            errors.append("TWSE 除權息來源失敗")
             print(f"[calendar_sync] TWSE 除權息資料查詢失敗（略過，不中斷同步）: {e}", file=sys.stderr)
 
         finnhub_key = os.environ.get("FINNHUB_API_KEY")
         try:
             events += fetch_us_earnings_events(us_symbols, finnhub_key)
         except Exception as e:
+            errors.append("Finnhub 財報來源失敗")
             print(f"[calendar_sync] Finnhub 財報日資料查詢失敗（略過，不中斷同步）: {e}", file=sys.stderr)
 
         for event in events:
             upsert_calendar_event(db, event)
 
+        if us_symbols and not finnhub_key:
+            errors.append("未設定 FINNHUB_API_KEY")
+        if errors:
+            raise RuntimeError("; ".join(errors))
         set_sync_meta_all(db, BROKER, True, None)
         print(f"[calendar_sync] 同步完成，共 {len(events)} 筆行事曆事件")
     except Exception as e:

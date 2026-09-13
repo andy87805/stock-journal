@@ -97,7 +97,10 @@ def build_positions(api, account):
         ex_dividends = 0.0
         entry_dates = []
         try:
-            for lot_index, det in enumerate(api.list_position_detail(account, getattr(pos, "id", 0))):
+            details = list(api.list_position_detail(account, getattr(pos, "id", 0)))
+            if not details:
+                raise RuntimeError("持股明細為空，保留上次資料")
+            for lot_index, det in enumerate(details):
                 # 明細的 price 是「該批總成本」，不是單價
                 lot_cost = _f(getattr(det, "price", 0))
                 lot_dividends = _f(getattr(det, "ex_dividends", 0))
@@ -127,11 +130,10 @@ def build_positions(api, account):
                     }
                 )
         except Exception as exc:
-            print(f"  [warn] {symbol} 庫存明細讀取失敗，改用均價推估總成本: {exc}")
+            raise RuntimeError(f"{symbol} 庫存明細不完整，停止更新") from exc
 
         if total_cost <= 0:
-            # 沒有明細可用時的退路：張數 × 1000 × 均價（零股會低估，只當備援）
-            total_cost = _f(getattr(pos, "quantity", 0)) * 1000 * avg_price
+            raise RuntimeError(f"{symbol} 成本無法確認，保留上次資料")
 
         positions.append(
             {
@@ -195,6 +197,8 @@ def _build_realized_window(api, account, begin, end):
         entry_date = None
         try:
             details = list(api.list_profit_loss_detail(account, getattr(pnl, "id", 0)))
+            if not details:
+                raise RuntimeError("損益明細為空")
             for det in details:
                 lot_cost = _f(getattr(det, "cost", 0))
                 lot_dividends = _f(getattr(det, "ex_dividend_amt", 0))
@@ -222,7 +226,7 @@ def _build_realized_window(api, account, begin, end):
                     )
             entry_date = weighted_entry_date(details)
         except Exception as exc:
-            print(f"  [warn] {symbol} {sell_date} 損益明細讀取失敗: {exc}")
+            raise RuntimeError(f"{symbol} 損益明細不完整，停止更新") from exc
 
         holding_days = None
         if entry_date:

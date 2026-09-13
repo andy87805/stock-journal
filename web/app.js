@@ -3,6 +3,7 @@ import {
   getAuth,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  sendEmailVerification,
   signOut,
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
@@ -54,6 +55,8 @@ const state = {
   dividends: [],
   options: [],
   symbols: {},
+  personalSymbols: {},
+  personalQuotes: {},
   settings: {},
   events: [],
   quotes: {},
@@ -122,7 +125,8 @@ const isEtf = (symbol, market) =>
 const symbolKey = (market, symbol) => `${market}:${String(symbol ?? "").replace(/\//g, "-")}`;
 
 function symbolName(symbol, market = "TW") {
-  const hit = state.symbols[symbolKey(market, symbol)];
+  const key = symbolKey(market, symbol);
+  const hit = state.personalSymbols[key] || state.symbols[key];
   return hit && hit.name ? hit.name : "";
 }
 
@@ -277,7 +281,10 @@ function computeBook(trades) {
         shares += qty;
         avgCost = shares > 0 ? totalCost / shares : 0;
       } else if (t.side === "sell") {
-        const sold = Math.min(qty, shares);
+        if (qty > shares + 0.000001) {
+          throw new Error(symbol + " 的賣出股數超過已知庫存，請補齊期初庫存或公司行動紀錄。");
+        }
+        const sold = qty;
         if (sold > 0) {
           const costBasis = sold * avgCost;
           const proceeds = sold * t.price - (t.fee || 0) - (t.tax || 0);
@@ -313,8 +320,16 @@ function computeBook(trades) {
   return { positions, lots };
 }
 
+function quoteFor(market, symbol) {
+  const key = symbolKey(market, symbol);
+  const q = state.personalQuotes[key] || state.quotes[key];
+  const updatedAt = q && parseDate(q.updatedAt);
+  if (!q || !updatedAt || Date.now() - updatedAt.getTime() > 4 * DAY_MS) return null;
+  return Number.isFinite(Number(q.price)) && Number(q.price) > 0 ? q : null;
+}
+
 const marketValue = (p) => {
-  const q = state.quotes[symbolKey(p.market, p.symbol)];
+  const q = quoteFor(p.market, p.symbol);
   return q && q.price ? p.shares * q.price : null;
 };
 
@@ -347,7 +362,7 @@ function allPositions() {
 
   for (const p of computeBook(state.trades).positions) {
     const mv = marketValue(p);
-    const q = state.quotes[symbolKey(p.market, p.symbol)];
+    const q = quoteFor(p.market, p.symbol);
     out.push({
       source: p.broker,
       symbol: p.symbol,
@@ -583,6 +598,8 @@ function normalizeOption(id, d) {
     strike: Number(d.strike) || 0,
     expiry,
     contracts: Number(d.contracts) || 0,
+    remainingContracts: Number(d.remainingContracts) || 0,
+    events: Array.isArray(d.events) ? d.events : [],
     openDate: d.openDate || null,
     closeDate: d.closeDate || null,
     premium: Number(d.premium) || 0,
@@ -604,7 +621,7 @@ function normalizeLot(id, d) {
     market: d.market || "TW",
     currency: d.currency || "TWD",
     status: d.status === "closed" ? "closed" : "open",
-    tradeDate: parseDate(d.tradeDate) || new Date(0),
+    tradeDate: parseDate(d.tradeDate),
     lots: Number(d.lots) || 0,
     cost: Number(d.cost) || 0,
     // open 的庫存明細沒給單價，缺就是缺，不用 cost 回推
@@ -644,12 +661,18 @@ function unsubscribeAll() {
   unsubs = [];
   Object.assign(state, {
     positions: [], realized: [], lots: [], trades: [], dividends: [], options: [],
-    symbols: {}, settings: {}, events: [], quotes: {}, fx: {}, syncMeta: [],
+    symbols: {}, personalSymbols: {}, personalQuotes: {}, settings: {}, events: [], quotes: {}, fx: {}, syncMeta: [],
     allowlist: [], ready: false,
   });
 }
 
 function subscribe() {
+  for (const [collectionName, field] of [["symbols", "personalSymbols"], ["quotes", "personalQuotes"]]) {
+    unsubs.push(onSnapshot(myCol(collectionName), (snap) => {
+      state[field] = Object.fromEntries(snap.docs.map((d) => [d.id, d.data()]));
+      render();
+    }));
+  }
   unsubs.push(onSnapshot(myCol("positions"), (snap) => {
     state.positions = snap.docs.map((d) => normalizePosition(d.id, d.data()));
     render();
@@ -766,8 +789,8 @@ function subscribe() {
 
 async function saveQuote(market, symbol, price) {
   await setDoc(
-    sharedDoc("quotes", symbolKey(market, symbol)),
-    { symbol, market, price, updatedAt: new Date().toISOString() },
+    myDoc("quotes", symbolKey(market, symbol)),
+    { symbol, market, price, source: "manual", updatedAt: new Date().toISOString() },
     { merge: true }
   );
 }
@@ -823,8 +846,8 @@ function relatedDocRefs(symbols, market) {
     if (set.has(o.underlying) && o.market === market) refs.push(myDoc("options", o.id));
   }
   for (const sym of set) {
-    refs.push(sharedDoc("quotes", symbolKey(market, sym)));
-    refs.push(sharedDoc("symbols", symbolKey(market, sym)));
+    refs.push(myDoc("quotes", symbolKey(market, sym)));
+    refs.push(myDoc("symbols", symbolKey(market, sym)));
   }
   return refs;
 }
@@ -870,7 +893,8 @@ const SCHWAB_ACTIONS = {
 
 const parseMoney = (v) => {
   if (v === null || v === undefined || v === "") return 0;
-  const n = parseFloat(String(v).replace(/[$,\s]/g, ""));
+  const text = String(v).trim().replace(/[$,\s]/g, "");
+  const n = Number(/^\(.*\)$/.test(text) ? "-" + text.slice(1, -1) : text);
   return isNaN(n) ? 0 : n;
 };
 
@@ -931,6 +955,12 @@ function parseSchwabExport(json, ignoredSymbols = []) {
     total: rows.length,
   };
   const contracts = new Map();
+  const idCounts = new Map();
+  const uniqueId = (base) => {
+    const count = (idCounts.get(base) || 0) + 1;
+    idCounts.set(base, count);
+    return count === 1 ? base : base + "_occ" + count;
+  };
   const optionRows = [];
   const nameTally = {};
 
@@ -947,6 +977,10 @@ function parseSchwabExport(json, ignoredSymbols = []) {
       continue;
     }
 
+    if (["Reverse Split", "Stock Split", "Stock Split Adj", "Cash In Lieu"].includes(action)) {
+      out.unclassified.push({ action, symbol, date: row.Date, why: "公司行動需要先核對換股比例與成本，暫停匯入以避免錯算" });
+      continue;
+    }
     if (SCHWAB_ACTIONS.ignore.has(action)) {
       out.ignored++;
       out.ignoredActions[action] = (out.ignoredActions[action] || 0) + 1;
@@ -955,6 +989,7 @@ function parseSchwabExport(json, ignoredSymbols = []) {
 
     if (SCHWAB_ACTIONS.optionOpen.has(action) || SCHWAB_ACTIONS.optionClose.has(action)) {
       const c = parseOptionContract(row);
+      if (c && ignoredSet.has(c.underlying)) { out.skippedBySymbol++; continue; }
       if (!c || !date) {
         out.unclassified.push({ action, symbol, date: row.Date, why: "選擇權合約代號無法解析" });
         continue;
@@ -966,7 +1001,7 @@ function parseSchwabExport(json, ignoredSymbols = []) {
     const isBuy = SCHWAB_ACTIONS.buy.has(action);
     const isSell = SCHWAB_ACTIONS.sell.has(action);
     if (isBuy || isSell) {
-      const quantity = Math.abs(parseFloat(row.Quantity) || 0);
+      const quantity = Math.abs(parseMoney(row.Quantity));
       const price = parseMoney(row.Price);
       if (!symbol || !date || !quantity) {
         out.unclassified.push({ action, symbol, date: row.Date, why: "缺少代號、日期或股數" });
@@ -976,7 +1011,7 @@ function parseSchwabExport(json, ignoredSymbols = []) {
         const tally = (nameTally[symbol] = nameTally[symbol] || {});
         tally[row.Description] = (tally[row.Description] || 0) + 1;
       }
-      const externalId = stableId([date, symbol, isBuy ? "B" : "S", quantity, price, amount]);
+      const externalId = uniqueId(stableId([date, symbol, isBuy ? "B" : "S", quantity, price, amount]));
       out.trades.push({
         broker: "schwab", symbol, market: "US", currency: "USD",
         side: isBuy ? "buy" : "sell",
@@ -1000,7 +1035,7 @@ function parseSchwabExport(json, ignoredSymbols = []) {
         amount, // 稅費本來就是負數，加總自然淨額
         kind: isTax ? "tax" : action === "Credit Interest" || action === "Bond Interest" ? "interest" : "dividend",
         payDate: `${date}T00:00:00Z`,
-        externalId: stableId([date, symbol || "CASH", action, amount]),
+        externalId: uniqueId(stableId([date, symbol || "CASH", action, amount])),
         action,
       });
       continue;
@@ -1009,50 +1044,60 @@ function parseSchwabExport(json, ignoredSymbols = []) {
     out.unclassified.push({ action, symbol, date: row.Date, why: "未知的交易類型" });
   }
 
-  // 先建開倉，平倉再回頭配對：標的分割後選擇權代號會被改成調整序列（實測 TSLL 平倉時
-  // 變成 TSLL1），逐列處理會把同一個合約拆成「開倉沒平倉」和「平倉沒開倉」兩筆。
+  // 依日期逐筆計算。不同開倉、部分平倉均保留現金流，不猜測調整合約。
+  optionRows.sort((a, b) => a.date.localeCompare(b.date) ||
+    Number(!SCHWAB_ACTIONS.optionOpen.has(a.action)) - Number(!SCHWAB_ACTIONS.optionOpen.has(b.action)));
   for (const { contract, action, date, row, amount, fee } of optionRows) {
-    if (!SCHWAB_ACTIONS.optionOpen.has(action)) continue;
     const key = contractKey(contract);
-    contracts.set(key, {
+    const opening = SCHWAB_ACTIONS.optionOpen.has(action);
+    const quantity = Math.abs(parseMoney(row.Quantity));
+    if (!quantity) {
+      out.unclassified.push({ action, symbol: row.Symbol, date, why: "選擇權口數缺漏或為零" });
+      continue;
+    }
+    const c = contracts.get(key) || {
       ...contract, id: key, broker: "schwab", market: "US", currency: "USD",
-      side: action === "Sell to Open" ? "short" : "long",
-      contracts: Math.abs(parseFloat(row.Quantity) || 0),
-      premium: amount, // 賣方為正、買方為負，已含手續費
-      fee,
-      status: "open", openDate: date, closeDate: null, realizedPnl: null,
-    });
-  }
-
-  // 只在完全比對不到時才去掉標的尾碼數字再試一次，避免誤傷本來就以數字結尾的代號
-  const matchAdjusted = (c) => {
-    const base = c.underlying.replace(/\d+$/, "");
-    if (base === c.underlying) return null;
-    const key = contractKey({ ...c, underlying: base });
-    return contracts.has(key) ? key : null;
-  };
-
-  for (const { contract, action, date, row } of optionRows) {
-    if (SCHWAB_ACTIONS.optionOpen.has(action)) continue;
-    const exact = contractKey(contract);
-    const key = contracts.has(exact) ? exact : matchAdjusted(contract) || exact;
-    const existing = contracts.get(key) || {
-      ...contract, id: exact, broker: "schwab", market: "US", currency: "USD",
-      side: "short", contracts: 0, premium: 0, fee: 0,
-      status: "open", openDate: null, closeDate: null, realizedPnl: null,
+      side: action === "Sell to Open" || action === "Buy to Close" ? "short" : "long",
+      contracts: 0, totalContracts: 0, premium: 0, fee: 0, status: "open",
+      openDate: null, closeDate: null, realizedPnl: 0, openPremium: 0, events: [],
     };
-    existing.status = action === "Assigned" ? "assigned" : action === "Expired" ? "expired" : "closed";
-    existing.closeDate = date;
-    if (!existing.contracts) existing.contracts = Math.abs(parseFloat(row.Quantity) || 0);
-    contracts.set(key, existing);
+    if (opening) {
+      const side = action === "Sell to Open" ? "short" : "long";
+      if (c.contracts && c.side !== side) {
+        out.unclassified.push({ action, symbol: row.Symbol, date, why: "同合約同時有多空部位，需分帳核對" });
+        continue;
+      }
+      c.side = side;
+      c.contracts += quantity;
+      c.totalContracts += quantity;
+      c.openPremium += amount;
+      c.premium += amount;
+      c.openDate = c.openDate || date;
+      c.status = "open";
+      c.closeDate = null;
+    } else {
+      if (quantity > c.contracts || !c.openDate ||
+          (action === "Buy to Close" && c.side !== "short") ||
+          (action === "Sell to Close" && c.side !== "long")) {
+        out.unclassified.push({ action, symbol: row.Symbol, date, why: "缺少對應開倉或合約調整資料，請匯出完整期間" });
+        continue;
+      }
+      const allocated = c.openPremium * quantity / c.contracts;
+      c.realizedPnl += allocated + amount;
+      c.openPremium -= allocated;
+      c.contracts -= quantity;
+      c.status = c.contracts ? "open" : action === "Assigned" ? "assigned" : action === "Expired" ? "expired" : "closed";
+      c.closeDate = c.contracts ? null : date;
+    }
+    c.fee += fee;
+    c.events.push(row);
+    contracts.set(key, c);
   }
-
   for (const c of contracts.values()) {
-    // 到期作廢或被指派，權利金就是這個合約的損益。被指派時標的的買賣另有一筆 Buy/Sell
-    // 紀錄（實測確認），成本由那筆承擔，這裡再合成一次會重複計算。
-    if (c.status !== "open") c.realizedPnl = c.premium;
-    // 早就過期卻沒有平倉紀錄，通常是匯出區間沒涵蓋到那次結算，標記出來而不是當成還持有
     c.staleOpen = c.status === "open" && c.expiry < new Date().toISOString().slice(0, 10);
+    if (c.status === "open" && !c.events.some(r => SCHWAB_ACTIONS.optionClose.has(r.Action))) c.realizedPnl = null;
+    c.remainingContracts = c.contracts;
+    if (!c.contracts) c.contracts = c.totalContracts;
     out.options.push(c);
   }
   // Description 有時是搬帳的交易敘述（「TDA TRAN - Bought 1 (BRK B) @311.82」）而不是公司名。
@@ -1084,8 +1129,19 @@ async function commitInBatches(writes, onProgress) {
 }
 
 async function importSchwab(parsed, onProgress) {
+  if (parsed.unclassified.length) throw new Error("有未能可靠解析的紀錄，請先核對後再匯入。");
   const syncedAt = new Date().toISOString();
   const writes = [];
+  for (const option of parsed.options) {
+    const existing = await getDoc(myDoc("options", option.id));
+    if (!existing.exists()) continue;
+    const prior = existing.data();
+    const from = parseSchwabDate(parsed.range.from), to = parseSchwabDate(parsed.range.to);
+    if (!from || !to || (prior.openDate && prior.openDate < from) ||
+        (prior.closeDate && prior.closeDate > to)) {
+      throw new Error("選擇權匯出期間未涵蓋既有合約，請重新匯出完整歷史。");
+    }
+  }
 
   for (const t of parsed.trades) {
     const { action, ...data } = t;
@@ -1103,7 +1159,7 @@ async function importSchwab(parsed, onProgress) {
   // 匯出檔的 Description 就是公司名稱，順便存起來讓介面顯示「Tesla Inc TSLA」
   for (const [symbol, name] of Object.entries(parsed.names)) {
     writes.push({
-      ref: sharedDoc("symbols", symbolKey("US", symbol)),
+      ref: myDoc("symbols", symbolKey("US", symbol)),
       data: { symbol, market: "US", name, source: "schwab", updatedAt: syncedAt },
     });
   }
@@ -1583,7 +1639,7 @@ function positionRow(p) {
   // 只有永豐部位的現價是同步寫進來的，其餘（手動、嘉信匯入）都沒有自動來源，要能手填
   // 同步抓得到的現價顯示唯讀（手改了下次同步也會被蓋回去）；
   // 抓不到的（債券 CUSIP、下市股）與手填過的才給輸入框，讓使用者能自己填或改錯字。
-  const quote = state.quotes[symbolKey(p.market, p.symbol)];
+  const quote = quoteFor(p.market, p.symbol);
   const priceIsManual = !quote || quote.source === "manual";
   const priceNode =
     priceIsManual
@@ -1703,7 +1759,7 @@ function ledgerRow(tx) {
 
 function viewLedger() {
   const all = allTransactions().filter(inMarket);
-  const years = [...new Set(all.map((t) => t.date.getFullYear()))].sort((a, b) => b - a);
+  const years = [...new Set(all.filter(t => t.date).map((t) => t.date.getFullYear()))].sort((a, b) => b - a);
   if (viewOptions.ledgerYear !== "all" && !years.includes(viewOptions.ledgerYear)) {
     viewOptions.ledgerYear = "all";
   }
@@ -1718,8 +1774,8 @@ function viewLedger() {
 
   const filtered = all.filter(
     (t) =>
-      (year === "all" || t.date.getFullYear() === year) &&
-      (month === "all" || t.date.getMonth() + 1 === month) &&
+      (year === "all" || t.date?.getFullYear() === year) &&
+      (month === "all" || (t.date ? t.date.getMonth() + 1 : null) === month) &&
       matchesQuery(t)
   );
 
@@ -1936,7 +1992,8 @@ function renderImportPreview(panel, parsed, filename) {
     }));
   }
   if (parsed.unclassified.length) {
-    children.push(el("div", { class: "flash", text: `${parsed.unclassified.length} 列無法辨識，不會匯入：` }));
+    confirmBtn.disabled = true;
+    children.push(el("div", { class: "flash", text: `${parsed.unclassified.length} 列需要核對，這次匯入已暫停：` }));
     children.push(el("div", { class: "row-sub" },
       parsed.unclassified.slice(0, 10).map((u) =>
         el("div", { text: `${u.date} ${u.action} ${u.symbol} — ${u.why}` }))));
@@ -1952,57 +2009,28 @@ function renderImportPreview(panel, parsed, filename) {
 }
 
 // 搜尋/篩選出一批紀錄後，可以整批刪掉。刪除前先講清楚會動到哪些東西。
-function deleteFilteredPanel(filtered, query) {
-  const symbols = [...new Set(filtered.map((t) => t.symbol))];
-  const markets = [...new Set(filtered.map((t) => t.market))];
-  const wholeSymbol = query && symbols.length >= 1 && markets.length === 1;
-  const status = el("div", { class: "row-sub", style: "margin-top:8px" });
-
-  const ignoreBox = el("input", { type: "checkbox", checked: "", style: "width:auto;margin-right:6px" });
-  const ignoreLabel = el("label", { style: "display:flex;align-items:center;font-weight:400" }, [
-    ignoreBox,
-    el("span", { text: `以後匯入時忽略 ${symbols.join("、")}（不然下次匯入會再長回來）` }),
-  ]);
-
+function deleteFilteredPanel(filtered) {
+  const trades = filtered.filter(t => t.trade && t.trade.id);
+  const status = el("div", { class: "row-sub" });
   const btn = el("button", {
     class: "btn btn-sm btn-danger",
-    text: `刪除這 ${filtered.length} 筆`,
+    text: "刪除篩選出的 " + trades.length + " 筆交易",
+    ...(trades.length ? {} : { disabled: "" }),
     onclick: async () => {
-      const scope = wholeSymbol
-        ? `${symbols.join("、")} 的所有紀錄（含買進批次、平倉、選擇權、股利、現價與名稱）`
-        : `目前篩選出的 ${filtered.length} 筆交易`;
-      if (!confirm(`確定要刪除 ${scope}？這個動作無法復原。`)) return;
+      if (!confirm("只刪除目前篩選出的 " + trades.length + " 筆交易；不刪除股利、選擇權及其他年份。確定繼續？")) return;
       btn.disabled = true;
       try {
-        const refs = wholeSymbol
-          ? relatedDocRefs(symbols, markets[0])
-          : filtered.filter((t) => t.kind === "trade").map((t) => myDoc("trades", t.id));
-        const n = await deleteDocsInBatches(refs, (d, total) => {
-          status.textContent = `刪除中… ${d} / ${total}`;
-        });
-        if (wholeSymbol && ignoreBox.checked) {
-          const current = state.settings.ignoredSymbols || [];
-          await setIgnoredSymbols([...new Set([...current, ...symbols])]);
-        }
-        status.textContent = `已刪除 ${n} 份文件。`;
-        viewOptions.ledgerQuery = "";
-        viewOptions.ledgerPage = 1;
+        await deleteDocsInBatches(trades.map(t => myDoc("trades", t.trade.id)));
+        status.textContent = "刪除完成。重新匯入原檔會還原這些交易。";
       } catch (err) {
-        status.textContent = `刪除失敗：${err.message}`;
+        status.textContent = "刪除失敗：" + err.message;
         btn.disabled = false;
       }
     },
   });
-
   return el("div", { class: "flash", style: "margin-top:12px" }, [
-    el("div", {
-      text: wholeSymbol
-        ? `符合「${query}」的有 ${symbols.join("、")}，共 ${filtered.length} 筆。`
-        : `目前篩選出 ${filtered.length} 筆。只會刪掉交易紀錄本身，不會動到平倉或選擇權。`,
-    }),
-    wholeSymbol ? ignoreLabel : null,
-    el("div", { style: "margin-top:8px" }, [btn]),
-    status,
+    el("div", { text: "僅刪除手動或嘉信匯入交易。永豐券商批次不在這裡刪除。" }),
+    btn, status,
   ]);
 }
 
@@ -2707,6 +2735,24 @@ function buildReportCsv(year) {
     lines.push("永豐配息只有累計金額、沒有發放日期，無法歸屬年度，未列入本表");
   }
 
+  lines.push("", "選擇權已實現損益（USD）", "合約,平倉日期,已實現損益");
+  for (const o of state.options) {
+    if (o.events?.length) {
+      // Replay each event prefix to measure realized P&L at each closing event.
+      let prior = 0;
+      for (let i = 0; i < o.events.length; i++) {
+        const parsed = parseSchwabExport({ BrokerageTransactions: o.events.slice(0, i + 1) });
+        const value = parsed.options.reduce((sum, c) => sum + (c.realizedPnl || 0), 0);
+        const day = parseSchwabDate(o.events[i].Date);
+        if (day?.startsWith(String(year) + "-") && SCHWAB_ACTIONS.optionClose.has(o.events[i].Action)) {
+          lines.push([o.underlying, day, (value - prior).toFixed(2)].map(csvEscape).join(","));
+        }
+        prior = value;
+      }
+    } else if (o.closeDate?.startsWith(String(year) + "-")) {
+      lines.push([o.underlying, o.closeDate, "待重新匯入核對"].map(csvEscape).join(","));
+    }
+  }
   return lines.join("\n");
 }
 
@@ -2864,14 +2910,14 @@ function viewOptionsScreen() {
   const open = all.filter((o) => o.status === "open" && !o.staleOpen);
   const stale = all.filter((o) => o.staleOpen);
   const closed = all.filter((o) => o.status !== "open");
-  const premium = closed.reduce((s, o) => s + (o.realizedPnl || 0), 0);
+  const premium = all.reduce((s, o) => s + (o.realizedPnl || 0), 0);
   const wins = closed.filter((o) => (o.realizedPnl || 0) > 0).length;
 
   frag.appendChild(
     el("div", { class: "stat-grid" }, [
       statTile("已結算權利金", fmtMoney(premium, "USD", 2), `${closed.length} 個合約`, pnlClass(premium)),
       statTile("未平倉", String(open.length), open.length ? "見下方到期日" : "目前沒有"),
-      statTile("到期作廢比例", closed.length ? `${fmtNum((wins / closed.length) * 100, 0)}%` : "—", "權利金留下的比例"),
+      statTile("已結算合約勝率", closed.length ? `${fmtNum((wins / closed.length) * 100, 0)}%` : "—", "已結算合約中獲利的比例"),
     ])
   );
 
@@ -2924,7 +2970,11 @@ function render() {
     a.classList.toggle("active", a.dataset.route === route);
   }
   const view = document.getElementById("view");
-  view.replaceChildren(ROUTES[route]());
+  try {
+    view.replaceChildren(ROUTES[route]());
+  } catch (err) {
+    view.replaceChildren(blankslate("資料需要核對", err.message));
+  }
 }
 
 function renderSyncBadge() {
@@ -2992,7 +3042,7 @@ const AUTH_ERRORS = {
 async function checkAllowed(user) {
   // 擁有者永遠通過，不然名單被自己清空就沒人能再加人了
   if (user.uid === OWNER_UID) return true;
-  if (!user.email) return false;
+  if (!user.email || !user.emailVerified) return false;
   try {
     const snap = await getDoc(sharedDoc("allowlist", user.email.toLowerCase()));
     return snap.exists();
@@ -3025,6 +3075,21 @@ function initAuth() {
   const modeHint = document.getElementById("authModeHint");
   const pendingBox = document.getElementById("authPending");
   const pendingEmail = document.getElementById("authPendingEmail");
+  const verifyBtn = el("button", {
+    class: "btn", text: "寄送信箱驗證信",
+    onclick: async () => {
+      if (!auth.currentUser) return;
+      verifyBtn.disabled = true;
+      try {
+        await sendEmailVerification(auth.currentUser);
+        verifyBtn.textContent = "驗證信已寄出，完成後重新登入";
+      } catch (err) {
+        verifyBtn.textContent = "寄送失敗，請稍後重試";
+        verifyBtn.disabled = false;
+      }
+    },
+  });
+  pendingBox.querySelector(".box-body").appendChild(verifyBtn);
   const settingsTab = document.querySelector('[data-route="/settings"]');
 
   let mode = "signin";
@@ -3090,7 +3155,8 @@ function initAuth() {
     if (settingsTab) settingsTab.classList.toggle("hidden", !session.owner);
 
     if (user && !session.allowed) {
-      pendingEmail.textContent = user.email || "";
+      pendingEmail.textContent = (user.email || "") + (user.emailVerified ? "" : "（尚未驗證信箱）");
+      verifyBtn.classList.toggle("hidden", user.emailVerified);
     }
 
     if (active) {
