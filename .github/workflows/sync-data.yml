@@ -13,6 +13,13 @@ on:
 #   brokers  每個使用者各跑一次，抓自己的券商資料寫進 users/{uid}/
 #   shared   跑一次就好，抓所有人都要用的市場資料（現價/名稱/匯率/行事曆）
 # 分開的原因：市場資料是共用的，每個使用者重複抓一次只是白白多打 API。
+permissions:
+  contents: read
+
+concurrency:
+  group: trading-data-sync
+  cancel-in-progress: false
+
 jobs:
   brokers:
     runs-on: ubuntu-latest
@@ -26,6 +33,9 @@ jobs:
             shioaji_key_secret: SHIOAJI_API_KEY
             shioaji_secret_secret: SHIOAJI_API_SECRET
             recipient_secret: RECIPIENT_EMAIL
+            schwab_id_secret: SCHWAB_CLIENT_ID
+            schwab_secret_secret: SCHWAB_CLIENT_SECRET
+            schwab_token_secret: SCHWAB_REFRESH_TOKEN
           # 第二個使用者。對應的 secret 沒設定的話整個 matrix 項目會自己跳過，
           # 不會每次執行都固定失敗（久了就會習慣性忽略失敗通知）。
           - name: partner
@@ -33,6 +43,9 @@ jobs:
             shioaji_key_secret: SHIOAJI_API_KEY_PARTNER
             shioaji_secret_secret: SHIOAJI_API_SECRET_PARTNER
             recipient_secret: RECIPIENT_EMAIL_PARTNER
+            schwab_id_secret: SCHWAB_CLIENT_ID_PARTNER
+            schwab_secret_secret: SCHWAB_CLIENT_SECRET_PARTNER
+            schwab_token_secret: SCHWAB_REFRESH_TOKEN_PARTNER
     env:
       FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
       # 決定這一輪要把資料寫進誰的 users/{uid} 底下。沒設定時同步腳本會直接失敗，
@@ -40,9 +53,9 @@ jobs:
       SYNC_USER_UID: ${{ secrets[matrix.uid_secret] }}
       SHIOAJI_API_KEY: ${{ secrets[matrix.shioaji_key_secret] }}
       SHIOAJI_API_SECRET: ${{ secrets[matrix.shioaji_secret_secret] }}
-      SCHWAB_CLIENT_ID: ${{ secrets.SCHWAB_CLIENT_ID }}
-      SCHWAB_CLIENT_SECRET: ${{ secrets.SCHWAB_CLIENT_SECRET }}
-      SCHWAB_REFRESH_TOKEN: ${{ secrets.SCHWAB_REFRESH_TOKEN }}
+      SCHWAB_CLIENT_ID: ${{ secrets[matrix.schwab_id_secret] }}
+      SCHWAB_CLIENT_SECRET: ${{ secrets[matrix.schwab_secret_secret] }}
+      SCHWAB_REFRESH_TOKEN: ${{ secrets[matrix.schwab_token_secret] }}
       SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       RECIPIENT_EMAIL: ${{ secrets[matrix.recipient_secret] }}
@@ -81,19 +94,6 @@ jobs:
         continue-on-error: true
         run: python sync/schwab_sync.py
 
-      # 行事曆是共用的，但提醒信要篩成自己的持股再寄到自己的信箱，所以放在這個 job
-      # 這個 workflow 一天跑兩次（台股收盤 + 美股收盤），提醒信只在台股那一輪寄，避免一天兩封
-      - name: Send calendar reminders (除權息/財報提醒信)
-        id: reminders
-        # 寄信的三個 secret 缺任一個就整步跳過。之前只檢查 RECIPIENT_EMAIL，
-        # 結果沒設寄件帳號時會拿空帳號去登入 SMTP、認證失敗，讓整個 job 變紅。
-        if: >-
-          steps.gate.outputs.configured == 'true' && env.RECIPIENT_EMAIL != '' &&
-          env.SENDER_EMAIL != '' && env.GMAIL_APP_PASSWORD != '' &&
-          (github.event_name == 'workflow_dispatch' || github.event.schedule == '35 5 * * 1-5')
-        continue-on-error: true
-        run: python sync/send_reminders.py
-
       # 前面幾步都設了 continue-on-error，job 本身不會因此變紅
       # 這一步手動檢查有沒有任一步失敗，有的話讓 job 失敗
       # 好處：GitHub 內建的失敗通知信才會正常觸發
@@ -101,8 +101,7 @@ jobs:
         if: always()
         run: |
           if [ "${{ steps.shioaji.outcome }}" = "failure" ] || \
-             [ "${{ steps.schwab.outcome }}" = "failure" ] || \
-             [ "${{ steps.reminders.outcome }}" = "failure" ]; then
+             [ "${{ steps.schwab.outcome }}" = "failure" ]; then
             echo "${{ matrix.name }} 至少一支同步腳本失敗，詳見上方對應步驟的 log"
             exit 1
           fi
@@ -158,3 +157,34 @@ jobs:
             echo "至少一支共用資料同步腳本失敗，詳見上方對應步驟的 log"
             exit 1
           fi
+
+  reminders:
+    runs-on: ubuntu-latest
+    needs: shared
+    if: always() && needs.shared.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - uid_secret: SYNC_UID_OWNER
+            recipient_secret: RECIPIENT_EMAIL
+          - uid_secret: SYNC_UID_PARTNER
+            recipient_secret: RECIPIENT_EMAIL_PARTNER
+    env:
+      FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      SYNC_USER_UID: ${{ secrets[matrix.uid_secret] }}
+      RECIPIENT_EMAIL: ${{ secrets[matrix.recipient_secret] }}
+      SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r sync/requirements.txt
+      - name: Send reminders after calendar update
+        if: >-
+          env.SYNC_USER_UID != '' && env.RECIPIENT_EMAIL != '' &&
+          env.SENDER_EMAIL != '' && env.GMAIL_APP_PASSWORD != '' &&
+          (github.event_name == 'workflow_dispatch' || github.event.schedule == '35 5 * * 1-5')
+        run: python sync/send_reminders.py

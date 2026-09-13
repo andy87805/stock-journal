@@ -192,10 +192,7 @@ def main():
     config, missing = mail_config()
     if config is None:
         # 沒配好寄信就不要把整個同步弄成失敗，但也不要讓內容消失，印到 log 裡
-        print(f"[send_reminders] 沒有設定 {', '.join(missing)}，不寄信。內容如下：")
-        print(f"Subject: {subject}")
-        print()
-        print(body)
+        print(f"[send_reminders] 沒有設定 {', '.join(missing)}，略過寄信；不輸出持股內容")
         return
 
     send_email(subject, body, config)
