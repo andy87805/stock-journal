@@ -263,6 +263,13 @@ function computeBook(trades) {
   const issues = [];
 
   for (const [key, list] of bySymbol) {
+    // Comcast 分拆於 2026-01-02 收盤後完成；目前 schema 尚無成本分攤。
+    // 只隔離生效時仍持有的舊嘉信部位，不影響事前已賣光或事後才買入者。
+    const spinoffDate = new Date("2026-01-03T00:00:00Z");
+    if (key === "US:CMCSA" && Date.now() >= +spinoffDate &&
+        list.some(t => t.broker === "schwab" && t.tradeDate < spinoffDate)) {
+      list.push({ side: "pending-spinoff", tradeDate: spinoffDate, broker: "schwab", currency: "USD" });
+    }
     // 僅套用已核對事件；每次使用區域清單，不改原始成交。
     for (const split of verifiedStockSplits()) {
       const day = new Date(split.date + "T00:00:00Z");
@@ -286,6 +293,14 @@ function computeBook(trades) {
     const broker = brokers.size === 1 ? [...brokers][0] : "manual";
 
     for (const t of list) {
+      if (t.side === "pending-spinoff") {
+        if (shares > 0.000001) {
+          issues.push({ symbol, market, message: "VSNT 分拆成本尚未分攤，需核對嘉信分拆後成本與零股交割成本" });
+          incomplete = true;
+          break;
+        }
+        continue;
+      }
       if (t.side === "split") {
         if (!Number.isFinite(t.splitRatio) || t.splitRatio <= 0 ||
             (t.splitRatio < 1 && Math.abs(shares * t.splitRatio - Math.round(shares * t.splitRatio)) > 0.000001)) {
@@ -1064,6 +1079,11 @@ function parseSchwabExport(json, ignoredSymbols = []) {
     if (verifiedRows.has(row)) {
       out.ignored++;
       out.ignoredActions[action] = (out.ignoredActions[action] || 0) + 1;
+      continue;
+    }
+    if (action === "Cash In Lieu" && symbol === "VSNT" && date === "2026-01-02") {
+      out.unclassified.push({ action, symbol, date: row.Date,
+        why: "收到 USD " + amount.toFixed(2) + "，不是股息或全額獲利。請提供嘉信 VSNT 零股出售的股數及成本，和 CMCSA 分拆後的持股成本；未核對前不寫入。" });
       continue;
     }
     if (["Reverse Split", "Stock Split", "Stock Split Adj", "Cash In Lieu"].includes(action)) {

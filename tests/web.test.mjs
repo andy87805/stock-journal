@@ -183,6 +183,28 @@ test("FFIE old CUSIP is ignored only when FFIE was explicitly excluded", () => {
   assert.equal(p.skippedBySymbol, 1);
 });
 
+test("CMCSA spinoff cost is quarantined only for holdings across distribution", () => {
+  const t = (side, day, symbol = "CMCSA") => ({ broker: "schwab", market: "US", symbol, side, quantity: 10, price: 30, tradeDate: new Date(day) });
+  const original = [t("buy", "2025-01-01"), t("buy", "2025-01-01", "OTHER")];
+  const result = ctx.computeBook(original);
+  assert.equal(result.issues.length, 1);
+  assert.equal(result.issues[0].symbol, "CMCSA");
+  assert.equal(result.positions.length, 1);
+  assert.equal(result.positions[0].symbol, "OTHER");
+  assert.equal(original.length, 2);
+  assert.equal(ctx.computeBook([t("buy", "2025-01-01"), t("sell", "2026-01-02")]).issues.length, 0);
+  assert.equal(ctx.computeBook([t("buy", "2026-01-05")]).issues.length, 0);
+});
+
+test("VSNT cash in lieu requests basis and is never classified as dividend or profit", () => {
+  const p = parse([{ Action: "Cash In Lieu", Symbol: "VSNT", Date: "01/06/2026 as of 01/02/2026", Amount: "$15.47" }]);
+  assert.equal(p.trades.length, 0);
+  assert.equal(p.dividends.length, 0);
+  assert.equal(p.unclassified.length, 1);
+  assert.match(p.unclassified[0].why, /15.47/);
+  assert.match(p.unclassified[0].why, /成本/);
+});
+
 test("stale prices unavailable and manual quotes isolated", () => {
   ctx.state.quotes["US:TEST"] = { price: 100, updatedAt: new Date().toISOString() };
   assert.equal(ctx.quoteFor("US", "TEST").price, 100);
