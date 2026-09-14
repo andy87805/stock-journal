@@ -1683,6 +1683,13 @@ function viewDashboard() {
   const positions = allPositions().filter(inMarket);
   const lots = allRealized().filter(inMarket);
   const frag = document.createDocumentFragment();
+  frag.appendChild(el("section", { class: "portfolio-intro", "aria-label": "投資總覽" }, [
+    el("div", { class: "portfolio-kicker", text: "PORTFOLIO / OVERVIEW" }),
+    el("h1", { text: "讓每一筆投資，都有脈絡。" }),
+    el("p", { text: "看清持倉、追蹤損益，累積屬於自己的投資紀錄。" }),
+    el("div", { class: "portfolio-art", "aria-hidden": "true" },
+      Array.from({ length: 9 }, (_, i) => el("span", { style: "--bar:" + i }))),
+  ]));
   frag.appendChild(marketBar());
 
   const cost = sumByCurrency(positions, (p) => p.totalCost);
@@ -3199,7 +3206,13 @@ function render() {
   }
   const view = document.getElementById("view");
   try {
+    const routeChanged = view.dataset.route !== route;
     view.replaceChildren(ROUTES[route]());
+    view.dataset.route = route;
+    if (routeChanged && !window.matchMedia("(prefers-reduced-motion: reduce)").matches && view.animate) {
+      view.animate([{ opacity: 0, transform: "translateY(8px)" }, { opacity: 1, transform: "translateY(0)" }],
+        { duration: 240, easing: "cubic-bezier(.2,.8,.2,1)" });
+    }
     const issues = computeBook(state.trades).issues.filter(inMarket);
     const incomplete = state.positions.filter(p => p.totalCost === null).filter(inMarket);
     if (issues.length || incomplete.length) {

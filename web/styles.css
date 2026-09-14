@@ -741,3 +741,53 @@ svg.chart {
   color: var(--fg);
   font-weight: 600;
 }
+
+/* Portfolio polish: keep Primer colours and the calibrated iOS safe area. */
+body {
+  background-image: radial-gradient(ellipse at 50% 0, color-mix(in srgb, var(--accent) 5%, transparent), transparent 650px);
+}
+main { max-width: 1080px; padding-top: 24px; }
+.portfolio-intro { position: relative; overflow: hidden; padding: 26px 28px; margin-bottom: 24px;
+  border: 1px solid var(--border); border-radius: 16px;
+  background: linear-gradient(115deg, var(--canvas-subtle), var(--canvas)); }
+.portfolio-kicker { color: var(--accent); font: 600 10px/1.5 ui-monospace, monospace; letter-spacing: .18em; }
+.portfolio-intro h1 { position: relative; z-index: 1; font-size: clamp(21px, 3vw, 30px); letter-spacing: -.04em; margin: 12px 0 8px; }
+.portfolio-intro p { position: relative; z-index: 1; margin: 0; color: var(--fg-muted); font-size: 13px; max-width: 75%; }
+.portfolio-art { position: absolute; right: 24px; top: 20px; bottom: 20px; width: 180px;
+  display: flex; align-items: center; gap: 10px; opacity: .12; transform: rotate(-12deg); pointer-events: none; }
+.portfolio-art span { position: relative; flex: 1; height: calc(22px + var(--bar) * 6px); background: var(--accent); border-radius: 3px; }
+.portfolio-art span::after { content: ""; position: absolute; top: -12px; bottom: -12px; left: calc(50% - 1px); width: 2px; background: inherit; }
+.portfolio-art span:nth-child(3n) { background: var(--success); }
+.box, .stat { border-radius: 12px; box-shadow: 0 3px 14px color-mix(in srgb, var(--fg) 3%, transparent); }
+.stat { position: relative; padding: 18px; overflow: hidden; min-width: 0;
+  background: linear-gradient(145deg, var(--canvas), var(--canvas-subtle));
+  transition: border-color .2s, box-shadow .2s, transform .2s; }
+.stat::before { content: ""; position: absolute; left: 18px; top: 0; width: 28px; height: 2px; background: var(--accent); opacity: .65; }
+.stat .label { letter-spacing: .025em; }
+.stat .value { font-variant-numeric: tabular-nums; font-size: 21px; letter-spacing: -.035em; margin-top: 8px; }
+.stat .sub { margin-top: 6px; }
+.box-header { padding: 14px 16px; }
+.box-row { transition: background-color .15s; }
+.btn, .tabnav a { transition: background-color .15s, border-color .15s, box-shadow .15s, transform .15s; }
+.btn:active { transform: translateY(1px); }
+.tabnav a.active { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.lens { padding: 8px 0; gap: 10px; }
+.flash { border-radius: 10px; }
+:is(button, a, input, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (hover: hover) and (pointer: fine) {
+  .stat:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 9%, transparent); }
+}
+@media (max-width: 600px) {
+  main { padding-top: 16px; }
+  .portfolio-intro { padding: 20px; margin-bottom: 16px; }
+  .portfolio-intro p { max-width: 90%; }
+  .portfolio-art { right: -38px; opacity: .08; }
+  .stat-grid { gap: 10px; }
+  .stat { padding: 14px; }
+  .stat .value { font-size: 19px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stat, .btn, .tabnav a, .box-row { transition: none; }
+  .stat:hover, .btn:active { transform: none; }
+}
