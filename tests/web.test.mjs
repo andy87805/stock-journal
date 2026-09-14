@@ -89,6 +89,50 @@ test("verified ANET split preserves cost and is applied once per calculation", (
   assert.equal(trades.length, 3);
   assert.equal(ctx.computeBook([t("buy", 2, 100, "2025-01-06")]).positions[0].shares, 2);
 });
+test("verified split pairs require both legs and exact quantities", () => {
+  const legs = [
+    { Action: "Stock Split", Symbol: "ANET", Date: "12/04/2024", Quantity: "8" },
+    { Action: "Stock Split Adj", Symbol: "040413106", Date: "12/04/2024", Quantity: "-2" },
+  ];
+  assert.equal(parse(legs).unclassified.length, 0);
+  assert.equal(parse(legs).trades.length, 0);
+  assert.equal(parse([legs[0]]).unclassified.length, 1);
+  assert.equal(parse([legs[0], { ...legs[1], Quantity: "-3" }]).unclassified.length, 2);
+  assert.equal(parse([...legs, legs[0]]).unclassified.length, 3);
+  assert.equal(parse([legs[0], { ...legs[1], Amount: "$1" }]).unclassified.length, 2);
+  assert.equal(parse(legs.map(r => ({ ...r, Date: "12/05/2024" }))).unclassified.length, 2);
+});
+
+test("reverse split preserves cost and precedes effective-day sale", () => {
+  const t = (side, quantity, price, day) => ({ broker: "schwab", market: "US", symbol: "ETH", side, quantity, price, tradeDate: new Date(day) });
+  const trades = [t("buy", 50, 3, "2024-10-01"), t("sell", 2, 40, "2024-11-20")];
+  const book = ctx.computeBook(trades);
+  assert.equal(book.issues.length, 0);
+  assert.equal(book.positions[0].shares, 3);
+  assert.equal(book.positions[0].avgCost, 30);
+  assert.equal(book.lots[0].realizedPnL, 20);
+  assert.equal(book.positions[0].shares * book.positions[0].avgCost + book.lots[0].costBasis, 150);
+  assert.equal(ctx.computeBook(trades).positions[0].shares, 3);
+  assert.equal(trades.length, 2);
+  assert.equal(ctx.computeBook([t("buy", 5, 30, "2024-11-20")]).positions[0].shares, 5);
+  assert.equal(ctx.computeBook([t("buy", 51, 3, "2024-10-01")]).issues.length, 1);
+  const pair = parse([
+    { Action: "Reverse Split", Symbol: "ETH", Date: "11/20/2024", Quantity: "5" },
+    { Action: "Reverse Split", Symbol: "38964R104", Date: "11/20/2024", Quantity: "-50" },
+  ]);
+  assert.equal(pair.unclassified.length, 0);
+  assert.equal(pair.trades.length, 0);
+});
+
+test("split runs before same-day purchase and rejects invalid ratios", () => {
+  const t = (side, quantity, day) => ({ broker: "schwab", market: "US", symbol: "ANET", side, quantity, price: 100, tradeDate: new Date(day) });
+  const book = ctx.computeBook([t("buy", 2, "2024-01-01"), t("buy", 1, "2024-12-04")]);
+  assert.equal(book.positions[0].shares, 9);
+  const explicit = { ...t("split", 0, "2024-12-04"), splitRatio: 4 };
+  assert.equal(ctx.computeBook([t("buy", 2, "2024-01-01"), explicit]).positions[0].shares, 8);
+  assert.equal(ctx.computeBook([t("buy", 2, "2024-01-01"), { ...explicit, splitRatio: 0 }]).issues.length, 1);
+});
+
 test("stale prices unavailable and manual quotes isolated", () => {
   ctx.state.quotes["US:TEST"] = { price: 100, updatedAt: new Date().toISOString() };
   assert.equal(ctx.quoteFor("US", "TEST").price, 100);

@@ -263,15 +263,17 @@ function computeBook(trades) {
   const issues = [];
 
   for (const [key, list] of bySymbol) {
-    // Arista 2024-12-04 起 1 拆 4；舊嘉信匯入曾忽略公司行動。
-    // 來源：Arista investor relations，2024-12-04 四拆一完成公告。
-    if (key === "US:ANET" && list.every(t => t.broker === "schwab") &&
-        !list.some(t => t.side === "split") &&
-        list.some(t => t.tradeDate < new Date("2024-12-04T00:00:00Z"))) {
-      list.push({ side: "split", splitRatio: 4, broker: "schwab", currency: "USD",
-        tradeDate: new Date("2024-12-04T00:00:00Z") });
+    // 僅套用已核對事件；每次使用區域清單，不改原始成交。
+    for (const split of verifiedStockSplits()) {
+      const day = new Date(split.date + "T00:00:00Z");
+      if (key === "US:" + split.symbol && list.every(t => t.broker === "schwab") &&
+          !list.some(t => t.side === "split" && +t.tradeDate === +day) &&
+          list.some(t => t.tradeDate < day)) {
+        list.push({ side: "split", splitRatio: split.ratio, broker: "schwab", currency: "USD", tradeDate: day });
+      }
     }
-    list.sort((a, b) => a.tradeDate - b.tradeDate);
+    // 生效日開盤前完成換股，必須早於同日買賣。
+    list.sort((a, b) => a.tradeDate - b.tradeDate || Number(b.side === "split") - Number(a.side === "split"));
     const lotStart = lots.length;
     let incomplete = false;
     let shares = 0;
@@ -285,6 +287,12 @@ function computeBook(trades) {
 
     for (const t of list) {
       if (t.side === "split") {
+        if (!Number.isFinite(t.splitRatio) || t.splitRatio <= 0 ||
+            (t.splitRatio < 1 && Math.abs(shares * t.splitRatio - Math.round(shares * t.splitRatio)) > 0.000001)) {
+          issues.push({ symbol, market, message: "換股比例或反分割零股待核對，需補齊現金替代交割紀錄" });
+          incomplete = true;
+          break;
+        }
         shares *= t.splitRatio;
         avgCost /= t.splitRatio;
         continue;
@@ -340,6 +348,14 @@ function computeBook(trades) {
   positions.sort((a, b) => b.shares * b.avgCost - a.shares * a.avgCost);
   lots.sort((a, b) => b.sellDate - a.sellDate);
   return { positions, lots, issues };
+}
+
+function verifiedStockSplits() {
+  // 公告來源及支援範圍見 FIXES.md；舊 CUSIP 只用於當日成對換股核對。
+  return [
+    { symbol: "ANET", oldSymbol: "040413106", date: "2024-12-04", ratio: 4, action: "Stock Split", oldAction: "Stock Split Adj" },
+    { symbol: "ETH", oldSymbol: "38964R104", date: "2024-11-20", ratio: 0.1, action: "Reverse Split", oldAction: "Reverse Split" },
+  ];
 }
 
 function quoteFor(market, symbol) {
@@ -999,6 +1015,24 @@ function parseSchwabExport(json, ignoredSymbols = []) {
   };
   const optionRows = [];
   const nameTally = {};
+  const verifiedRows = new Set();
+  for (const split of verifiedStockSplits()) {
+    const matching = rows.filter(r => r && parseSchwabDate(r.Date) === split.date &&
+      ((r.Symbol === split.symbol && r.Action === split.action) ||
+       (r.Symbol === split.oldSymbol && r.Action === split.oldAction)));
+    // 缺其中一腿、多筆、金額非零或換股比例不符，一律留待核對。
+    if (matching.length !== 2) continue;
+    const incoming = matching.find(r => r.Symbol === split.symbol);
+    const outgoing = matching.find(r => r.Symbol === split.oldSymbol);
+    try {
+      if (!incoming || !outgoing) continue;
+      const before = -parseMoney(outgoing.Quantity);
+      const after = parseMoney(incoming.Quantity);
+      if (before <= 0 || after <= 0 || Math.abs(before * split.ratio - after) > 0.000001 ||
+          matching.some(r => parseMoney(r.Amount) !== 0 || parseMoney(r["Fees & Comm"]) !== 0 || parseMoney(r.Price) !== 0)) continue;
+      matching.forEach(r => verifiedRows.add(r));
+    } catch { /* 無效值交由逐列驗證回報 */ }
+  }
 
   for (const row of rows) {
     if (!row || typeof row !== "object" || Array.isArray(row)) {
@@ -1025,8 +1059,9 @@ function parseSchwabExport(json, ignoredSymbols = []) {
       continue;
     }
 
-    if (action === "Stock Split" && symbol === "ANET" && date === "2024-12-04") {
+    if (verifiedRows.has(row)) {
       out.ignored++;
+      out.ignoredActions[action] = (out.ignoredActions[action] || 0) + 1;
       continue;
     }
     if (["Reverse Split", "Stock Split", "Stock Split Adj", "Cash In Lieu"].includes(action)) {
