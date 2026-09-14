@@ -641,6 +641,7 @@ function normalizeOption(id, d) {
     contracts: Number(d.contracts) || 0,
     remainingContracts: Number(d.remainingContracts) || 0,
     events: Array.isArray(d.events) ? d.events : [],
+    adjustment: d.adjustment || null,
     openDate: d.openDate || null,
     closeDate: d.closeDate || null,
     premium: Number(d.premium) || 0,
@@ -1054,7 +1055,8 @@ function parseSchwabExport(json, ignoredSymbols = []) {
     }
 
     // 使用者刪掉整檔後會列進忽略清單，不然每次匯入都會把刪掉的資料長回來
-    if (symbol && ignoredSet.has(symbol)) {
+    // Nasdaq ECA2024-96：307359703 是 FFIE 舊 CUSIP；只擴充使用者已選擇的忽略範圍。
+    if (symbol && (ignoredSet.has(symbol) || (symbol === "307359703" && ignoredSet.has("FFIE")))) {
       out.skippedBySymbol++;
       continue;
     }
@@ -1076,7 +1078,7 @@ function parseSchwabExport(json, ignoredSymbols = []) {
 
     if (SCHWAB_ACTIONS.optionOpen.has(action) || SCHWAB_ACTIONS.optionClose.has(action)) {
       const c = parseOptionContract(row);
-      if (c && ignoredSet.has(c.underlying)) { out.skippedBySymbol++; continue; }
+      if (c && (ignoredSet.has(c.underlying) || (c.underlying === "TSLL1" && ignoredSet.has("TSLL")))) { out.skippedBySymbol++; continue; }
       if (!c || !date) {
         out.unclassified.push({ action, symbol, date: row.Date, why: "選擇權合約代號無法解析" });
         continue;
@@ -1129,12 +1131,40 @@ function parseSchwabExport(json, ignoredSymbols = []) {
     out.unclassified.push({ action, symbol, date: row.Date, why: "未知的交易類型" });
   }
 
-  // 依日期逐筆計算。不同開倉、部分平倉均保留現金流，不猜測調整合約。
+  // OCC #57857：只支援已核對的 TSLL → TSLL1，2025-12-10 生效。
+  // 指派的現金腿與口數腿必須唯一配對；保留原始兩列供追溯，不重複平倉。
+  const cashLegs = optionRows.filter(e => e.contract.underlying === "TSLL1" &&
+    e.action === "Assigned" && !String(e.row.Symbol || "").trim() && !parseMoney(e.row.Quantity));
+  const consumedCash = new Set();
+  for (const e of optionRows) {
+    if (e.contract.underlying !== "TSLL1" || e.action !== "Assigned" || !parseMoney(e.row.Quantity)) continue;
+    const matches = cashLegs.filter(c => c.date === e.date && contractKey(c.contract) === contractKey(e.contract));
+    const closingCount = optionRows.filter(c => c.action === "Assigned" && c.date === e.date &&
+      contractKey(c.contract) === contractKey(e.contract) && parseMoney(c.row.Quantity)).length;
+    const cash = matches[0];
+    const descriptionQty = cash && /^(\d+)\s+TSLL1\s/.exec(String(cash.row.Description || ""));
+    const qty = Math.abs(parseMoney(e.row.Quantity));
+    if (matches.length !== 1 || closingCount !== 1 || !descriptionQty || Number(descriptionQty[1]) !== qty ||
+        Math.abs(Math.abs(cash.amount) - qty * 57.94) > 0.000001 || cash.fee !== 0 || e.amount !== 0) continue;
+    e.amount = cash.amount;
+    e.row = { ...e.row, Amount: String(cash.amount), SourceEvents: [e.row, cash.row] };
+    consumedCash.add(cash);
+  }
+
+  // 依日期逐筆計算。不同開倉、部分平倉均保留現金流。
   optionRows.sort((a, b) => a.date.localeCompare(b.date) ||
     Number(!SCHWAB_ACTIONS.optionOpen.has(a.action)) - Number(!SCHWAB_ACTIONS.optionOpen.has(b.action)));
-  for (const { contract, action, date, row, amount, fee } of optionRows) {
-    const key = contractKey(contract);
+  for (const entry of optionRows) {
+    if (consumedCash.has(entry)) continue;
+    const { contract, action, date, row, amount, fee } = entry;
+    const adjusted = contract.underlying === "TSLL1";
+    const key = contractKey(adjusted ? { ...contract, underlying: "TSLL" } : contract);
     const opening = SCHWAB_ACTIONS.optionOpen.has(action);
+    if (adjusted && (opening || date < "2025-12-10" || date > "2025-12-19" || contract.expiry !== "2025-12-19" ||
+        !contracts.has(key) || contracts.get(key).events.some(r => parseSchwabDate(r.Date) >= "2025-12-10" && SCHWAB_ACTIONS.optionOpen.has(r.Action)))) {
+      out.unclassified.push({ action, symbol: row.Symbol, date, why: "調整合約缺少生效日前的對應開倉，暫不合併" });
+      continue;
+    }
     const quantity = Math.abs(parseMoney(row.Quantity));
     if (!quantity) {
       out.unclassified.push({ action, symbol: row.Symbol, date, why: "選擇權口數缺漏或為零" });
@@ -1146,6 +1176,10 @@ function parseSchwabExport(json, ignoredSymbols = []) {
       contracts: 0, totalContracts: 0, premium: 0, fee: 0, status: "open",
       openDate: null, closeDate: null, realizedPnl: 0, openPremium: 0, events: [],
     };
+    if (!adjusted && c.adjustment) {
+      out.unclassified.push({ action, symbol: row.Symbol, date, why: "標準與調整合約同時存在，需分開核對" });
+      continue;
+    }
     if (opening) {
       const side = action === "Sell to Open" ? "short" : "long";
       if (c.contracts && c.side !== side) {
@@ -1161,6 +1195,11 @@ function parseSchwabExport(json, ignoredSymbols = []) {
       c.status = "open";
       c.closeDate = null;
     } else {
+      if (adjusted && action === "Assigned" &&
+          Math.abs(amount - (c.side === "short" ? -1 : 1) * (contract.kind === "C" ? 1 : -1) * quantity * 57.94) > 0.000001) {
+        out.unclassified.push({ action, symbol: row.Symbol, date, why: "TSLL1 指派現金交割缺漏或金額不符" });
+        continue;
+      }
       if (quantity > c.contracts || !c.openDate ||
           (action === "Buy to Close" && c.side !== "short") ||
           (action === "Sell to Close" && c.side !== "long")) {
@@ -1174,6 +1213,7 @@ function parseSchwabExport(json, ignoredSymbols = []) {
       c.status = c.contracts ? "open" : action === "Assigned" ? "assigned" : action === "Expired" ? "expired" : "closed";
       c.closeDate = c.contracts ? null : date;
     }
+    if (adjusted) c.adjustment = { symbol: "TSLL1", effectiveDate: "2025-12-10", sharesPerContract: 100, cashPerContract: 57.94, source: "OCC 57857" };
     c.fee += fee;
     c.events.push(row);
     contracts.set(key, c);
@@ -1225,6 +1265,12 @@ async function importSchwab(parsed, onProgress) {
   const syncedAt = new Date().toISOString();
   const writes = [];
   for (const option of parsed.options) {
+    if (option.adjustment) {
+      const adjustedId = contractKey({ ...option, underlying: option.adjustment.symbol });
+      const duplicate = await getDoc(myDoc("options", adjustedId));
+      checkSession();
+      if (duplicate.exists()) throw new Error("已有分開儲存的調整合約，請先備份對帳，避免重複計算。");
+    }
     const existing = await getDoc(myDoc("options", option.id));
     checkSession();
     if (!existing.exists()) continue;
@@ -2984,6 +3030,7 @@ function optionRow(o) {
     `履約 ${fmtNum(o.strike)}`,
     `到期 ${o.expiry}`,
   ];
+  if (o.adjustment) parts.push("調整合約 " + o.adjustment.symbol + "（每口 100 股＋US$57.94）");
   if (o.openDate) parts.push(`開倉 ${o.openDate}`);
   if (o.closeDate) parts.push(`${OPTION_STATUS_LABEL[o.status]} ${o.closeDate}`);
   if (o.status === "open" && !o.staleOpen && days !== null) parts.push(`剩 ${days} 天`);

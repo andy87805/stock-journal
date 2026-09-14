@@ -133,6 +133,56 @@ test("split runs before same-day purchase and rejects invalid ratios", () => {
   assert.equal(ctx.computeBook([t("buy", 2, "2024-01-01"), { ...explicit, splitRatio: 0 }]).issues.length, 1);
 });
 
+const adjustedRows = () => [
+  { Action: "Sell to Open", Symbol: "TSLL 12/19/2025 22.00 C", Quantity: "5", Amount: "$500", Date: "11/25/2025" },
+  { Action: "Assigned", Symbol: "TSLL1 12/19/2025 22.00 C", Quantity: "5", Amount: "", Date: "12/19/2025" },
+  { Action: "Assigned", Symbol: "", Description: "5 TSLL1 12/19/2025 22.00 C", Quantity: "", Amount: "-$289.70", Date: "12/19/2025" },
+];
+
+test("TSLL1 cash leg closes once and event replay preserves realized cashflow", () => {
+  const rows = adjustedRows();
+  const before = JSON.stringify(rows);
+  const p = parse(rows);
+  assert.equal(p.unclassified.length, 0);
+  assert.equal(p.options.length, 1);
+  const o = p.options[0];
+  assert.equal(o.id, "schwab_TSLL_2025-12-19_22_C");
+  assert.equal(o.remainingContracts, 0);
+  assert.ok(Math.abs(o.realizedPnl - 210.30) < 0.000001);
+  assert.equal(o.events.length, 2);
+  assert.equal(o.events[1].SourceEvents.length, 2);
+  assert.equal(parse(o.events).options[0].realizedPnl, o.realizedPnl);
+  assert.equal(JSON.stringify(rows), before);
+});
+
+test("TSLL1 missing duplicate wrong-date or incorrect cash legs remain blocked", () => {
+  const rows = adjustedRows();
+  for (const sample of [rows.slice(0, 2), [...rows, rows[2]],
+    [rows[0], rows[1], { ...rows[2], Amount: "-$1" }],
+    [rows[0], rows[1], { ...rows[2], Date: "12/18/2025" }],
+    [rows[0], rows[1], { ...rows[2], Amount: "$289.70" }],
+    [rows[0], rows[1], { ...rows[2], Description: "4 TSLL1 12/19/2025 22.00 C" }]]) {
+    assert.ok(parse(sample).unclassified.length > 0);
+  }
+});
+
+test("TSLL1 expiration links pre-adjustment opening but never a new standard contract", () => {
+  const rows = adjustedRows();
+  const expired = { ...rows[1], Action: "Expired" };
+  assert.equal(parse([rows[0], expired]).options[0].realizedPnl, 500);
+  assert.ok(parse([{ ...rows[0], Date: "12/11/2025" }, expired]).unclassified.length);
+  assert.ok(parse([expired]).unclassified.length);
+  assert.equal(ctx.parseSchwabExport({ BrokerageTransactions: rows }, ["TSLL"]).options.length, 0);
+});
+
+test("FFIE old CUSIP is ignored only when FFIE was explicitly excluded", () => {
+  const rows = [{ Action: "Reverse Split", Symbol: "307359703", Quantity: "-100", Date: "08/19/2024" }];
+  assert.equal(parse(rows).unclassified.length, 1);
+  const p = ctx.parseSchwabExport({ BrokerageTransactions: rows }, ["FFIE"]);
+  assert.equal(p.unclassified.length, 0);
+  assert.equal(p.skippedBySymbol, 1);
+});
+
 test("stale prices unavailable and manual quotes isolated", () => {
   ctx.state.quotes["US:TEST"] = { price: 100, updatedAt: new Date().toISOString() };
   assert.equal(ctx.quoteFor("US", "TEST").price, 100);
@@ -174,6 +224,20 @@ test("delete uses actual ledger shape and never expands symbol scope", async () 
   ]);
   await panel.children[1].onclick();
   assert.deepEqual(refs, ["trades/one"]);
+});
+
+test("legacy adjusted option document blocks import before writes", async () => {
+  let commits = 0;
+  const c = vm.createContext({ Date, session: { uid: "test" },
+    contractKey: o => "schwab_" + o.underlying + "_2025-12-19_22_C",
+    myDoc: (name, id) => name + "/" + id,
+    getDoc: async () => ({ exists: () => true }),
+    commitInBatches: async () => { commits++; },
+  });
+  vm.runInContext(section("async function importSchwab(", "/* ---------- charts"), c);
+  await assert.rejects(c.importSchwab({ unclassified: [], trades: [], dividends: [], names: {},
+    options: [{ id: "original", adjustment: { symbol: "TSLL1" } }] }), /調整合約/);
+  assert.equal(commits, 0);
 });
 
 test("import conflict preflight writes nothing", async () => {
