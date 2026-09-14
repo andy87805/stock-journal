@@ -1287,6 +1287,20 @@ async function commitInBatches(writes, onProgress) {
   return done;
 }
 
+async function withImportLock(task) {
+  const uid = session.uid;
+  if (!uid) throw new Error("尚未登入，不能匯入");
+  if (typeof navigator === "undefined" || !navigator.locks?.request) {
+    throw new Error("此瀏覽器不支援安全匯入鎖，請改用最新版 Safari、Chrome 或 Edge。");
+  }
+  // Web Locks 同源、同瀏覽器分頁共用，頁面關閉自動釋放；不宣稱跨裝置互斥。
+  return navigator.locks.request("stock-journal:import:" + uid, { mode: "exclusive", ifAvailable: true }, async lock => {
+    if (!lock) throw new Error("另一個分頁正在匯入，請等該次完成後再試。");
+    if (session.uid !== uid) throw new Error("帳號已變更，已停止匯入");
+    return task();
+  });
+}
+
 async function importSchwab(parsed, onProgress) {
   const expectedUid = session.uid;
   const checkSession = () => {
@@ -2180,9 +2194,9 @@ function renderImportPreview(panel, parsed, filename) {
     onclick: async () => {
       confirmBtn.disabled = true;
       try {
-        const n = await importSchwab(parsed, (done, total) => {
+        const n = await withImportLock(() => importSchwab(parsed, (done, total) => {
           status.textContent = `寫入中… ${done} / ${total}`;
-        });
+        }));
         status.textContent = `完成，共寫入 ${n} 筆。重複匯入同一份不會產生重複資料。`;
         confirmBtn.remove();
       } catch (err) {

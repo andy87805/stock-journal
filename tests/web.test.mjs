@@ -365,6 +365,37 @@ test("delete halts after account switch and reports uncertain failure", async ()
   }
 });
 
+test("import lock rejects competing tabs and releases after failure", async () => {
+  let busy = false, release;
+  const c = vm.createContext({ session: { uid: "first" }, navigator: { locks: {
+    request: async (key, config, callback) => {
+      assert.equal(key, "stock-journal:import:first");
+      assert.equal(config.ifAvailable, true);
+      if (busy) return callback(null);
+      busy = true;
+      try { return await callback({ name: key }); } finally { busy = false; }
+    },
+  } } });
+  vm.runInContext(section("async function withImportLock(", "async function importSchwab("), c);
+  const first = c.withImportLock(() => new Promise(resolve => { release = resolve; }));
+  await assert.rejects(c.withImportLock(() => assert.fail("must not run")), /另一個分頁/);
+  release(1);
+  assert.equal(await first, 1);
+  await assert.rejects(c.withImportLock(() => { throw Error("write failed"); }), /write failed/);
+  assert.equal(await c.withImportLock(() => 2), 2);
+});
+
+test("unsupported locks and changed account never begin import", async () => {
+  for (const changed of [false, true]) {
+    const session = { uid: "first" };
+    const c = vm.createContext({ session, navigator: changed ? { locks: { request: async (k, o, cb) => {
+      session.uid = "second"; return cb({});
+    } } } : {} });
+    vm.runInContext(section("async function withImportLock(", "async function importSchwab("), c);
+    await assert.rejects(c.withImportLock(() => assert.fail("must not run")), changed ? /帳號已變更/ : /不支援/);
+  }
+});
+
 test("changing accounts between batches stops remaining writes", async () => {
   let commits = 0;
   const session = { uid: "first" };
