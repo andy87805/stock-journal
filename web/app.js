@@ -911,12 +911,19 @@ function relatedDocRefs(symbols, market) {
 }
 
 async function deleteDocsInBatches(refs, onProgress) {
+  const expectedUid = session.uid;
   let done = 0;
   for (let i = 0; i < refs.length; i += BATCH_LIMIT) {
+    if (!expectedUid || session.uid !== expectedUid) throw new Error("帳號已變更，已停止刪除；已確認刪除 " + done + " 筆，請回原帳號重新查閱。");
     const batch = writeBatch(db);
     for (const ref of refs.slice(i, i + BATCH_LIMIT)) batch.delete(ref);
-    await batch.commit();
+    try {
+      await batch.commit();
+    } catch {
+      throw new Error("刪除中斷：已確認刪除 " + done + " / " + refs.length + " 筆；本批結果未確認，請重新載入核對，不代表全部未刪除。");
+    }
     done += Math.min(BATCH_LIMIT, refs.length - i);
+    if (session.uid !== expectedUid) throw new Error("帳號已變更，已停止刪除；已確認刪除 " + done + " 筆，請回原帳號重新查閱。");
     if (onProgress) onProgress(done, refs.length);
   }
   return done;
@@ -1268,8 +1275,13 @@ async function commitInBatches(writes, onProgress) {
     if (!expectedUid || session.uid !== expectedUid) throw new Error("帳號已變更，已停止匯入；請用原帳號重試原檔。");
     const batch = writeBatch(db);
     for (const w of writes.slice(i, i + BATCH_LIMIT)) batch.set(w.ref, w.data, { merge: true });
-    await batch.commit();
+    try {
+      await batch.commit();
+    } catch {
+      throw new Error("匯入中斷：已確認寫入 " + done + " / " + writes.length + " 筆；本批結果未確認，並未自動回復。請以原帳號、同一份原檔重試，不要先刪除既有資料。");
+    }
     done += Math.min(BATCH_LIMIT, writes.length - i);
+    if (session.uid !== expectedUid) throw new Error("帳號已變更，已停止匯入；已確認寫入 " + done + " 筆，請回原帳號核對。");
     if (onProgress) onProgress(done, writes.length);
   }
   return done;

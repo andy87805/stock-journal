@@ -288,6 +288,42 @@ test("changing accounts during preflight stops all writes", async () => {
   assert.equal(commits, 0);
 });
 
+test("failed import reports confirmed batches without claiming rollback", async () => {
+  let commits = 0;
+  const c = vm.createContext({ session: { uid: "first" }, BATCH_LIMIT: 1, db: {},
+    writeBatch: () => ({ set() {}, commit: async () => { if (++commits === 2) throw Error("network"); } }),
+  });
+  vm.runInContext(section("async function commitInBatches(", "async function importSchwab("), c);
+  await assert.rejects(c.commitInBatches([{ ref: "one", data: {} }, { ref: "two", data: {} }]), /已確認寫入 1 \/ 2.*本批結果未確認/);
+  assert.equal(commits, 2);
+});
+
+test("account change on final import batch cannot report success", async () => {
+  const session = { uid: "first" };
+  const c = vm.createContext({ session, BATCH_LIMIT: 450, db: {},
+    writeBatch: () => ({ set() {}, commit: async () => { session.uid = "second"; } }),
+  });
+  vm.runInContext(section("async function commitInBatches(", "async function importSchwab("), c);
+  await assert.rejects(c.commitInBatches([{ ref: "one", data: {} }]), /帳號已變更/);
+});
+
+test("delete halts after account switch and reports uncertain failure", async () => {
+  for (const mode of ["switch", "failure", "signed-out"]) {
+    let commits = 0;
+    const session = { uid: mode === "signed-out" ? null : "first" };
+    const c = vm.createContext({ session, BATCH_LIMIT: 1, db: {},
+      writeBatch: () => ({ delete() {}, commit: async () => {
+        commits++;
+        if (mode === "switch") session.uid = "second";
+        if (mode === "failure") throw Error("network");
+      } }),
+    });
+    vm.runInContext(section("async function deleteDocsInBatches(", "/* ---------- 嘉信匯出檔解析"), c);
+    await assert.rejects(c.deleteDocsInBatches(["one", "two"]), mode === "failure" ? /本批結果未確認/ : /帳號已變更/);
+    assert.equal(commits, mode === "signed-out" ? 0 : 1);
+  }
+});
+
 test("changing accounts between batches stops remaining writes", async () => {
   let commits = 0;
   const session = { uid: "first" };
