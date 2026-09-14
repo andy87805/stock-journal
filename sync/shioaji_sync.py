@@ -15,8 +15,8 @@ id 是 0..n-1 的連續索引，實測可以正確選到對應那一筆的明細
 
 ## 單位地雷
 
-`quantity` 是**張**，零股會顯示 0（不是沒有股票）。所以金額一律用明細的總額欄位加總，
-不要用 `quantity × 1000` 回推股數。
+庫存查詢明確指定 `Unit.Share`，`quantity` 是精確股數，直接存入 shares。
+明細欄位與舊資料的單位不能混用；金額仍使用明細總額，不從張數或四捨五入均價反推股數。
 
 環境變數：SHIOAJI_API_KEY、SHIOAJI_API_SECRET、FIREBASE_SERVICE_ACCOUNT
 只需要金鑰的「帳務 + 正式環境」權限，不需要「交易」權限，也不需要 CA 憑證。
@@ -73,7 +73,7 @@ def weighted_entry_date(details):
     return date.fromordinal(round(weighted / total_cost)).isoformat()
 
 
-def build_positions(api, account):
+def build_positions(api, account, unit="Share"):
     """庫存 + 逐檔明細。
 
     明細除了加總成本/配息，本身就是「各批買進紀錄」（有買進日期），一併回傳存成 lots，
@@ -83,7 +83,9 @@ def build_positions(api, account):
     quotes = []
     open_lots = []
     undated = 0
-    for pos in api.list_positions(account):
+    # 官方支援 Unit.Share，避免整張模式把零股截斷。
+    # https://sinotrade.github.io/tutor/accounting/position/
+    for pos in api.list_positions(account=account, unit=unit):
         symbol = str(getattr(pos, "code", "")).strip()
         if not symbol:
             continue
@@ -133,13 +135,15 @@ def build_positions(api, account):
             raise RuntimeError(f"{symbol} 庫存明細不完整，停止更新") from exc
 
         missing_cost = total_cost <= 0
+        shares = _f(getattr(pos, "quantity", None), default=None)
 
         positions.append(
             {
                 "symbol": symbol,
                 "market": MARKET,
                 "currency": CURRENCY,
-                "lots": _f(getattr(pos, "quantity", 0)),
+                "shares": shares,
+                "lots": shares / 1000 if shares is not None else None,
                 "avgPrice": avg_price,
                 "lastPrice": last_price,
                 "totalCost": None if missing_cost else round(total_cost, 2),
@@ -402,7 +406,7 @@ def main():
         end = date.today()
         begin = end - timedelta(days=args.days)
 
-        positions, quotes, open_lots = build_positions(api, account)
+        positions, quotes, open_lots = build_positions(api, account, unit=sj.Unit.Share)
         realized, closed_lots = build_realized(api, account, begin, end)
 
         incomplete = {p["symbol"] for p in positions if p["totalCost"] is None}

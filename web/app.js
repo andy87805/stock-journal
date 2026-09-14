@@ -344,10 +344,14 @@ function computeBook(trades) {
 
 function quoteFor(market, symbol) {
   const key = symbolKey(market, symbol);
-  const q = state.personalQuotes[key] || state.quotes[key];
-  const updatedAt = q && parseDate(q.updatedAt);
-  if (!q || !updatedAt || Date.now() - updatedAt.getTime() > 4 * DAY_MS) return null;
-  return Number.isFinite(Number(q.price)) && Number(q.price) > 0 ? q : null;
+  for (const q of [state.personalQuotes[key], state.quotes[key]]) {
+    const updatedAt = q && parseDate(q.updatedAt);
+    if (!q || !updatedAt) continue;
+    const age = Date.now() - updatedAt.getTime();
+    if (age < -300000 || age > 4 * DAY_MS) continue;
+    if (Number.isFinite(Number(q.price)) && Number(q.price) > 0) return q;
+  }
+  return null;
 }
 
 const marketValue = (p) => {
@@ -368,10 +372,8 @@ function allPositions() {
     symbol: p.symbol,
     market: p.market,
     currency: p.currency,
-    // 零股的 lots 是 0，用 lots × 1000 回推股數會得到 0，只能用金額回推
-    // 券商只給到小數兩位的均價，成本 ÷ 均價 會帶進除法誤差（9038.6002 這種）。
-    // 台股不會有小數股，四捨五入才不會顯示出根本不存在的精確度。
-    shares: p.avgPrice > 0 && p.totalCost !== null ? Math.round(p.totalCost / p.avgPrice) : null,
+    // 股數直接使用 Unit.Share 回傳；舊資料待下次同步補齊，不用均價反推。
+    shares: p.shares,
     avgCost: p.avgPrice,
     totalCost: p.totalCost,
     lastPrice: p.lastPrice || null,
@@ -572,6 +574,7 @@ function normalizePosition(id, d) {
     market: d.market || "TW",
     currency: d.currency || "TWD",
     avgPrice: Number(d.avgPrice) || 0,
+    shares: d.shares == null || !Number.isFinite(Number(d.shares)) || Number(d.shares) < 0 ? null : Number(d.shares),
     lastPrice: Number(d.lastPrice) || 0,
     totalCost: d.totalCost == null ? null : Number(d.totalCost),
     marketValue: d.marketValue == null ? null : Number(d.marketValue),
@@ -916,9 +919,12 @@ const SCHWAB_ACTIONS = {
 
 const parseMoney = (v) => {
   if (v === null || v === undefined || v === "") return 0;
-  const text = String(v).trim().replace(/[$,\s]/g, "");
-  const n = Number(/^\(.*\)$/.test(text) ? "-" + text.slice(1, -1) : text);
-  return isNaN(n) ? 0 : n;
+  let text = String(v).trim().replace(/[$\s]/g, "");
+  if (/^\(.*\)$/.test(text)) text = "-" + text.slice(1, -1);
+  if (!/^[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$/.test(text)) throw new Error("數值格式無效");
+  const n = Number(text.replace(/,/g, ""));
+  if (!Number.isFinite(n)) throw new Error("數值格式無效");
+  return n;
 };
 
 // 選擇權的日期是「07/20/2026 as of 07/17/2026」，as of 後面才是實際發生日
@@ -926,7 +932,10 @@ const parseSchwabDate = (v) => {
   const text = String(v || "");
   const part = text.includes(" as of ") ? text.split(" as of ")[1] : text;
   const m = part.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  return m ? `${m[3]}-${m[1]}-${m[2]}` : null;
+  if (!m) return null;
+  const day = new Date(Date.UTC(Number(m[3]), Number(m[1]) - 1, Number(m[2])));
+  if (day.getUTCFullYear() !== Number(m[3]) || day.getUTCMonth() + 1 !== Number(m[1]) || day.getUTCDate() !== Number(m[2])) return null;
+  return `${m[3]}-${m[1]}-${m[2]}`;
 };
 
 const OPTION_SYMBOL_RE = /^(\S+)\s+(\d{2})\/(\d{2})\/(\d{4})\s+([\d.]+)\s+([CP])\b/;
@@ -937,10 +946,13 @@ function parseOptionContract(row) {
   const desc = String(row.Description || "").trim().replace(/^\d+\s+/, "");
   const m = fromSymbol || OPTION_SYMBOL_RE.exec(desc);
   if (!m) return null;
+  const expiry = parseSchwabDate(m[2] + "/" + m[3] + "/" + m[4]);
+  const strike = Number(m[5]);
+  if (!expiry || !Number.isFinite(strike) || strike <= 0) return null;
   return {
     underlying: m[1],
-    expiry: `${m[4]}-${m[2]}-${m[3]}`,
-    strike: parseFloat(m[5]),
+    expiry,
+    strike,
     kind: m[6],
   };
 }
@@ -969,7 +981,8 @@ const titleCaseName = (raw) =>
     .join(" ");
 
 function parseSchwabExport(json, ignoredSymbols = []) {
-  const rows = (json && json.BrokerageTransactions) || [];
+  if (!json || !Array.isArray(json.BrokerageTransactions)) throw new Error("這不是嘉信交易 JSON 匯出檔");
+  const rows = json.BrokerageTransactions;
   const ignoredSet = new Set(ignoredSymbols);
   const out = {
     trades: [], dividends: [], options: [], names: {}, skippedBySymbol: 0,
@@ -988,11 +1001,23 @@ function parseSchwabExport(json, ignoredSymbols = []) {
   const nameTally = {};
 
   for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      out.unclassified.push({ action: "", symbol: "", date: "", why: "交易列格式無效" });
+      continue;
+    }
     const action = String(row.Action || "").trim();
     const date = parseSchwabDate(row.Date);
     const symbol = String(row.Symbol || "").trim();
-    const amount = parseMoney(row.Amount);
-    const fee = parseMoney(row["Fees & Comm"]);
+    let amount, fee, quantity, price;
+    try {
+      amount = parseMoney(row.Amount);
+      fee = parseMoney(row["Fees & Comm"]);
+      quantity = Math.abs(parseMoney(row.Quantity));
+      price = parseMoney(row.Price);
+    } catch {
+      out.unclassified.push({ action, symbol, date: row.Date, why: "金額、股數、價格或費用格式無效" });
+      continue;
+    }
 
     // 使用者刪掉整檔後會列進忽略清單，不然每次匯入都會把刪掉的資料長回來
     if (symbol && ignoredSet.has(symbol)) {
@@ -1028,9 +1053,7 @@ function parseSchwabExport(json, ignoredSymbols = []) {
     const isBuy = SCHWAB_ACTIONS.buy.has(action);
     const isSell = SCHWAB_ACTIONS.sell.has(action);
     if (isBuy || isSell) {
-      const quantity = Math.abs(parseMoney(row.Quantity));
-      const price = parseMoney(row.Price);
-      if (!symbol || !date || !quantity) {
+      if (!symbol || !date || !quantity || price <= 0) {
         out.unclassified.push({ action, symbol, date: row.Date, why: "缺少代號、日期或股數" });
         continue;
       }
@@ -1144,8 +1167,10 @@ function parseSchwabExport(json, ignoredSymbols = []) {
 const BATCH_LIMIT = 450;
 
 async function commitInBatches(writes, onProgress) {
+  const expectedUid = session.uid;
   let done = 0;
   for (let i = 0; i < writes.length; i += BATCH_LIMIT) {
+    if (!expectedUid || session.uid !== expectedUid) throw new Error("帳號已變更，已停止匯入；請用原帳號重試原檔。");
     const batch = writeBatch(db);
     for (const w of writes.slice(i, i + BATCH_LIMIT)) batch.set(w.ref, w.data, { merge: true });
     await batch.commit();
@@ -1156,11 +1181,17 @@ async function commitInBatches(writes, onProgress) {
 }
 
 async function importSchwab(parsed, onProgress) {
+  const expectedUid = session.uid;
+  const checkSession = () => {
+    if (!expectedUid || session.uid !== expectedUid) throw new Error("帳號已變更，已停止匯入");
+  };
+  checkSession();
   if (parsed.unclassified.length) throw new Error("有未能可靠解析的紀錄，請先核對後再匯入。");
   const syncedAt = new Date().toISOString();
   const writes = [];
   for (const option of parsed.options) {
     const existing = await getDoc(myDoc("options", option.id));
+    checkSession();
     if (!existing.exists()) continue;
     const prior = existing.data();
     const from = parseSchwabDate(parsed.range.from), to = parseSchwabDate(parsed.range.to);
@@ -1191,6 +1222,26 @@ async function importSchwab(parsed, onProgress) {
     });
   }
 
+  // 所有衝突檢查完成前不寫入任何批次，避免相同 ID 靜默覆蓋不同成交。
+  const identity = (data) => JSON.stringify([
+    data.broker, data.market, data.symbol, data.side || "", data.currency,
+    data.quantity ?? null, data.price ?? null, data.amount ?? null,
+    data.tradeDate || data.payDate || "", data.fee || 0, data.tax || 0,
+  ]);
+  const records = writes.filter(item => "externalId" in item.data);
+  for (let i = 0; i < records.length; i += 20) {
+    checkSession();
+    const group = records.slice(i, i + 20);
+    const existingDocs = await Promise.all(group.map(item => getDoc(item.ref)));
+    checkSession();
+    for (let j = 0; j < group.length; j++) {
+      const existing = existingDocs[j];
+      if (existing.exists() && identity(existing.data()) !== identity(group[j].data)) {
+        throw new Error("匯入紀錄與既有成交 ID 衝突，尚未寫入；請先核對原始匯出檔。");
+      }
+    }
+  }
+  checkSession();
   await commitInBatches(writes, onProgress);
   return writes.length;
 }

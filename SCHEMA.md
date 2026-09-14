@@ -70,7 +70,8 @@ collection 名稱與欄位皆固定如下，改動前先更新本檔案。
 | symbol | string | 股票代號，如 `"0050"` |
 | market | string | `"TW"` |
 | currency | string | `"TWD"` |
-| lots | number | 張數（`list_positions.quantity`）。**零股會是 0**，不代表沒有股票 |
+| shares | number? | 以 `list_positions(unit=Unit.Share).quantity` 回傳的精確股數；舊資料尚未同步時可缺漏 |
+| lots | number? | 庫存股數除以 1000，可有小數；不可套用到其他明細集合的 lots |
 | avgPrice | number | 每股平均成本（`price`） |
 | lastPrice | number | 每股現價（`last_price`） |
 | totalCost | number | 總成本 = `list_position_detail[].price` 之和（每筆是該批的**總額**不是單價） |
@@ -81,8 +82,8 @@ collection 名稱與欄位皆固定如下，改動前先更新本檔案。
 | cond | string | `"Cash"` / `"MarginTrading"` / `"ShortSelling"` |
 | syncedAt | string | ISO8601 |
 
-> 不要用 `lots × 1000` 去回推股數：零股的 `lots` 是 0。金額一律用 `totalCost` / `marketValue`，
-> 需要股數時用 `totalCost / avgPrice`。
+> 股數使用 `shares`，不再從 `totalCost / avgPrice` 反推。舊庫存沒有 shares 時顯示未知，待同步補齊。
+> 官方介面：https://sinotrade.github.io/tutor/accounting/position/
 
 ## collection: `realized`
 永豐每一次平倉的已實現損益。document ID = `sinopac_{sellDate}_{dseq}`（`dseq` 實測唯一，加日期防跨年重複）。

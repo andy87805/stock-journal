@@ -20,7 +20,7 @@ class SyncTests(unittest.TestCase):
 
     def test_missing_position_details_stop_update(self):
         api = SimpleNamespace(
-            list_positions=lambda account: [SimpleNamespace(code="TEST", price=100, pnl=20, id=1)],
+            list_positions=lambda account, **kwargs: [SimpleNamespace(code="TEST", price=100, pnl=20, id=1)],
             list_position_detail=lambda account, id: [],
         )
         with self.assertRaises(RuntimeError):
@@ -36,7 +36,7 @@ class SyncTests(unittest.TestCase):
 
     def test_pending_zero_cost_does_not_stop_other_positions(self):
         api = SimpleNamespace(
-            list_positions=lambda account: [SimpleNamespace(code="PENDING", price=0, pnl=0, id=0), SimpleNamespace(code="OK", price=100, pnl=20, id=1)],
+            list_positions=lambda account, **kwargs: [SimpleNamespace(code="PENDING", price=0, pnl=0, id=0), SimpleNamespace(code="OK", price=100, pnl=20, id=1)],
             list_position_detail=lambda account, id: [SimpleNamespace(price=0 if id == 0 else 1000, date="2026-01-01")],
         )
         positions, _, _ = self.ns["build_positions"](api, None)
@@ -46,7 +46,7 @@ class SyncTests(unittest.TestCase):
 
     def test_undated_position_preserves_cost_and_unknown_date(self):
         api = SimpleNamespace(
-            list_positions=lambda account: [SimpleNamespace(code="TEST", price=100, pnl=20, id=1)],
+            list_positions=lambda account, **kwargs: [SimpleNamespace(code="TEST", price=100, pnl=20, id=1)],
             list_position_detail=lambda *args: [SimpleNamespace(price=1000, date=None)],
         )
         positions, quotes, lots = self.ns["build_positions"](api, None)
@@ -62,6 +62,16 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(windows[-1][1], end)
         for left, right in zip(windows, windows[1:]):
             self.assertEqual(left[1] + timedelta(days=1), right[0])
+
+    def test_share_unit_preserves_odd_lots_without_cost_inference(self):
+        def positions(account, unit):
+            self.assertEqual(unit, "Share")
+            return [SimpleNamespace(code="TEST", quantity=51, price=99.99, id=1)]
+        api = SimpleNamespace(list_positions=positions,
+            list_position_detail=lambda *args: [SimpleNamespace(price=5000, date="2026-01-01")])
+        rows, _, _ = self.ns["build_positions"](api, None)
+        self.assertEqual(rows[0]["shares"], 51)
+        self.assertEqual(rows[0]["lots"], 0.051)
 
 if __name__ == "__main__":
     unittest.main()
