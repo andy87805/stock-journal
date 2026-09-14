@@ -742,6 +742,12 @@ svg.chart {
   font-weight: 600;
 }
 
+.reconcile-title { font-size: 24px; margin: 0 0 12px; }
+.reconcile-metric { display: grid; grid-template-columns: .8fr repeat(3, 1fr); gap: 6px; padding: 8px 0; border-bottom: 1px solid var(--border-muted); font-size: 12px; }
+.reconcile-metric span { min-width: 0; overflow-wrap: anywhere; }
+.reconcile-metric span:not(:first-child) { text-align: right; }
+.reconcile-heading, .reconcile-notes { color: var(--fg-muted); }
+.reconcile-notes { padding-left: 18px; font-size: 12px; }
 /* Portfolio polish: keep Primer colours and the calibrated iOS safe area. */
 body {
   background-image: radial-gradient(ellipse at 50% 0, color-mix(in srgb, var(--accent) 5%, transparent), transparent 650px);

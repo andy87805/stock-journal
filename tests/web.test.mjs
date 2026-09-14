@@ -2,6 +2,27 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { reconcile } from "../web/reconciliation.mjs";
+
+test("reconciliation distinguishes missing baseline and actual cost discrepancy", () => {
+  const p = { broker: "sinopac", market: "TW", symbol: "TEST", totalCost: 100, shares: 10, unrealizedPnl: 20 };
+  const lot = { ...p, status: "open", cost: 90, tradeDate: new Date() };
+  const input = { positions: [p], lots: [lot], book: { positions: [], issues: [] } };
+  assert.equal(reconcile(input)[0].costDelta, -10);
+  assert.equal(reconcile(input)[0].appShares, null);
+  assert.equal(reconcile({ ...input, lots: [] })[0].costDelta, null);
+  assert.equal(reconcile({ ...input, lots: [{ ...lot, cost: null }] })[0].costDelta, null);
+  assert.equal(reconcile({ ...input, positions: [p, p] })[0].appCost, null);
+  assert.equal(reconcile({ ...input, lots: [{ ...lot, broker: "other" }] })[0].appCost, null);
+});
+
+test("reconciliation retains quarantined symbols and never fabricates broker baseline", () => {
+  const rows = reconcile({ book: { positions: [{ symbol: "A", shares: 2, avgCost: 10 }],
+    issues: [{ symbol: "B", market: "US", message: "missing basis" }] } });
+  assert.equal(rows[0].appCost, 20);
+  assert.equal(rows[0].brokerCost, null);
+  assert.equal(rows[1].messages[0], "missing basis");
+});
 
 const source = fs.readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
 function section(start, end) {

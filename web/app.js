@@ -20,6 +20,7 @@ import {
   writeBatch,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig, OWNER_UID } from "./firebase-config.js";
+import { reconcile } from "./reconciliation.mjs";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -680,7 +681,7 @@ function normalizeLot(id, d) {
     status: d.status === "closed" ? "closed" : "open",
     tradeDate: parseDate(d.tradeDate),
     lots: Number(d.lots) || 0,
-    cost: Number(d.cost) || 0,
+    cost: d.cost == null || !Number.isFinite(Number(d.cost)) ? null : Number(d.cost),
     // open 的庫存明細沒給單價，缺就是缺，不用 cost 回推
     unitPrice:
       d.unitPrice === null || d.unitPrice === undefined || d.unitPrice === ""
@@ -3174,7 +3175,37 @@ function viewOptionsScreen() {
   return frag;
 }
 
+function viewReconciliation() {
+  const frag = document.createDocumentFragment();
+  frag.appendChild(el("h1", { class: "reconcile-title", text: "對帳中心" }));
+  frag.appendChild(marketBar());
+  frag.appendChild(el("p", { class: "muted", text: "差額＝App 減券商。同來源相符不等於獨立對帳完成；— 代表缺少資料，不是零。此頁只讀，不會修改交易。" }));
+  const rows = reconcile({ positions: state.positions, lots: state.lots, book: computeBook(state.trades) }).filter(inMarket);
+  if (!rows.length) frag.appendChild(blankslate("尚無可對帳資料", "請先同步券商資料或匯入交易紀錄。"));
+  for (const row of rows) {
+    const number = v => Number.isFinite(v) ? fmtNum(v, 2) : "—";
+    const metric = (label, broker, app) => el("div", { class: "reconcile-metric" }, [
+      el("span", { text: label }), el("span", { class: "mono", text: number(broker) }),
+      el("span", { class: "mono", text: number(app) }),
+      el("span", { class: "mono", text: Number.isFinite(broker) && Number.isFinite(app) ? number(app - broker) : "—" }),
+    ]);
+    frag.appendChild(el("section", { class: "box" }, [
+      el("div", { class: "box-header" }, [symbolLabel(row.symbol, row.market), el("span", { class: "muted", text: row.currency })]),
+      el("div", { class: "box-body" }, [
+        el("p", { class: "row-sub", text: row.sourceLabel }),
+        el("div", { class: "reconcile-metric reconcile-heading" }, ["項目", "券商", "App／批次", "差額"].map(text => el("span", { text }))),
+        metric("股數", row.brokerShares, row.appShares),
+        metric("成本", row.brokerCost, row.appCost),
+        metric("未實現", row.brokerPnl, row.appPnl),
+        el("ul", { class: "reconcile-notes" }, row.messages.map(text => el("li", { text }))),
+      ]),
+    ]));
+  }
+  return frag;
+}
+
 const ROUTES = {
+  "/reconciliation": viewReconciliation,
   "/": viewDashboard,
   "/positions": viewPositions,
   "/ledger": viewLedger,
