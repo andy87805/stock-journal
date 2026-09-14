@@ -1,5 +1,15 @@
 # 2026-09-13 修正與部署注意事項
 
+## 2026-09-14 回歸修正
+
+- 修正嚴格庫存檢查讓整個畫面消失的回歸：只隔離該股票暫算結果，其他部位正常顯示，頁面提示部分合計。
+- ANET 2024-12-04 四拆一由計算層套用一次，適用於舊嘉信原始交易，不修改原始交易或猜測其他公司的換股比例。
+- 拆股來源：https://investors.arista.com/Communications/Press-Releases-and-Events/Press-Release-Detail/2024/Arista-Networks-Completes-Four-for-One-Stock-Split-2024-UzV4VbnUJu/default.aspx
+- 券商回傳非正成本時標記 missing-cost，估值留空，保留上次批次與 lastKnownTotalCost，其餘部位繼續更新；API 查詢異常仍停止寫入。
+- lastStatus 區分 success、partial、failed，報價部分缺漏不再顯示全部失敗。
+- 手動執行同步預設不寄信，可另外勾選 send_reminders；排程提醒維持原有時間。
+- 15 項本機測試與 Edge 無頭瀏覽器 36 次頁面／市場渲染通過；測試均未寄信。
+
 本次只修改程式，未修改或刪除正式資料，未寄信。
 
 ## 已修正

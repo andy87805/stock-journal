@@ -7,7 +7,12 @@ on:
     # 21:30 UTC ≈ 16:30-17:30 美東時間（美股收盤後），美國有夏令時間切換
     # 這個 cron 是固定 UTC 時間，夏令/冬令會差一小時，個人用途可接受，不精修
     - cron: "30 21 * * 1-5"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      send_reminders:
+        description: "本次手動同步是否寄送提醒信"
+        type: boolean
+        default: false
 
 # 兩段式：
 #   brokers  每個使用者各跑一次，抓自己的券商資料寫進 users/{uid}/
@@ -186,5 +191,5 @@ jobs:
         if: >-
           env.SYNC_USER_UID != '' && env.RECIPIENT_EMAIL != '' &&
           env.SENDER_EMAIL != '' && env.GMAIL_APP_PASSWORD != '' &&
-          (github.event_name == 'workflow_dispatch' || github.event.schedule == '35 5 * * 1-5')
+          ((github.event_name == 'workflow_dispatch' && inputs.send_reminders) || github.event.schedule == '35 5 * * 1-5')
         run: python sync/send_reminders.py

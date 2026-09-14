@@ -132,8 +132,7 @@ def build_positions(api, account):
         except Exception as exc:
             raise RuntimeError(f"{symbol} 庫存明細不完整，停止更新") from exc
 
-        if total_cost <= 0:
-            raise RuntimeError(f"{symbol} 成本無法確認，保留上次資料")
+        missing_cost = total_cost <= 0
 
         positions.append(
             {
@@ -143,9 +142,10 @@ def build_positions(api, account):
                 "lots": _f(getattr(pos, "quantity", 0)),
                 "avgPrice": avg_price,
                 "lastPrice": last_price,
-                "totalCost": round(total_cost, 2),
-                "marketValue": round(total_cost + unrealized, 2),
-                "unrealizedPnl": round(unrealized, 2),
+                "totalCost": None if missing_cost else round(total_cost, 2),
+                "marketValue": None if missing_cost else round(total_cost + unrealized, 2),
+                "unrealizedPnl": None if missing_cost else round(unrealized, 2),
+                "dataQuality": "missing-cost" if missing_cost else "complete",
                 "exDividends": round(ex_dividends, 2),
                 "earliestEntryDate": min(entry_dates) if entry_dates else None,
                 "cond": cond,
@@ -405,6 +405,20 @@ def main():
         positions, quotes, open_lots = build_positions(api, account)
         realized, closed_lots = build_realized(api, account, begin, end)
 
+        incomplete = {p["symbol"] for p in positions if p["totalCost"] is None}
+        if incomplete:
+            # 成本待補時保留上一份明細，不用新的零成本批次覆蓋。
+            open_lots = [lot for lot in open_lots if lot["symbol"] not in incomplete]
+            for old in root.collection("lots").stream():
+                data = old.to_dict()
+                if data.get("broker") == BROKER and data.get("status") == "open" and data.get("symbol") in incomplete:
+                    open_lots.append(data)
+            old_positions = {d.id: d.to_dict() for d in root.collection("positions").stream()}
+            for p in positions:
+                if p["symbol"] in incomplete:
+                    old = old_positions.get(f"{BROKER}_{p['symbol']}_{p.get('cond', 'Cash')}", {})
+                    p["lastKnownTotalCost"] = old.get("totalCost") if old.get("totalCost") is not None else old.get("lastKnownTotalCost")
+
         written, stale = replace_positions(root, BROKER, positions)
         print(f"[shioaji_sync] 庫存 {written} 檔（清掉 {stale} 筆已不存在）")
 
@@ -427,7 +441,9 @@ def main():
         if no_entry:
             print(f"[shioaji_sync] 這些平倉紀錄拿不到進場日，持有天數留空: {', '.join(no_entry)}")
 
-        set_sync_meta(root, BROKER, True, None)
+        set_sync_meta(root, BROKER, True,
+                      f"{len(incomplete)} 檔券商成本待補，未計入估值" if incomplete else None,
+                      status="partial" if incomplete else "success")
 
         try:
             api.logout()

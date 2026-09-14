@@ -50,10 +50,27 @@ test("short history and corporate actions block rather than fabricate", () => {
 test("ignore list covers option underlying", () => {
   assert.equal(ctx.parseSchwabExport({ BrokerageTransactions: [option("Sell to Open", "$200")] }, ["TEST"]).options.length, 0);
 });
-test("overselling does not silently truncate shares", () => {
+test("overselling isolates the symbol without silently truncating shares", () => {
   const t = (side, quantity) => ({ market: "US", symbol: "TEST", side, quantity, price: 100, tradeDate: new Date("2026-01-01") });
-  assert.throws(() => ctx.computeBook([t("buy", 10), t("sell", 15)]), /TEST/);
+  const result = ctx.computeBook([t("buy", 10), t("sell", 15), { ...t("buy", 5), symbol: "OTHER" }]);
+  assert.equal(result.issues[0].symbol, "TEST");
+  assert.equal(result.lots.length, 0);
+  assert.equal(result.positions.length, 1);
+  assert.equal(result.positions[0].symbol, "OTHER");
   assert.equal(ctx.computeBook([t("buy", 10), t("sell", 5)]).positions[0].shares, 5);
+});
+
+test("verified ANET split preserves cost and is applied once per calculation", () => {
+  const t = (side, quantity, price, day) => ({ broker: "schwab", market: "US", symbol: "ANET", side, quantity, price, tradeDate: new Date(day) });
+  const trades = [t("buy", 2, 100, "2023-01-06"), t("sell", 2, 120, "2025-11-25"), t("sell", 4, 140, "2026-01-28")];
+  const result = ctx.computeBook(trades);
+  assert.equal(result.issues.length, 0);
+  assert.equal(result.positions[0].shares, 2);
+  assert.equal(result.positions[0].avgCost, 25);
+  assert.equal(result.lots.reduce((s, l) => s + l.costBasis, 0) + 2 * 25, 200);
+  assert.equal(ctx.computeBook(trades).positions[0].shares, 2);
+  assert.equal(trades.length, 3);
+  assert.equal(ctx.computeBook([t("buy", 2, 100, "2025-01-06")]).positions[0].shares, 2);
 });
 test("stale prices unavailable and manual quotes isolated", () => {
   ctx.state.quotes["US:TEST"] = { price: 100, updatedAt: new Date().toISOString() };

@@ -260,9 +260,20 @@ function computeBook(trades) {
 
   const positions = [];
   const lots = [];
+  const issues = [];
 
   for (const [key, list] of bySymbol) {
+    // Arista 2024-12-04 起 1 拆 4；舊嘉信匯入曾忽略公司行動。
+    // 來源：Arista investor relations，2024-12-04 四拆一完成公告。
+    if (key === "US:ANET" && list.every(t => t.broker === "schwab") &&
+        !list.some(t => t.side === "split") &&
+        list.some(t => t.tradeDate < new Date("2024-12-04T00:00:00Z"))) {
+      list.push({ side: "split", splitRatio: 4, broker: "schwab", currency: "USD",
+        tradeDate: new Date("2024-12-04T00:00:00Z") });
+    }
     list.sort((a, b) => a.tradeDate - b.tradeDate);
+    const lotStart = lots.length;
+    let incomplete = false;
     let shares = 0;
     let avgCost = 0;
     let openedAt = null;
@@ -273,6 +284,11 @@ function computeBook(trades) {
     const broker = brokers.size === 1 ? [...brokers][0] : "manual";
 
     for (const t of list) {
+      if (t.side === "split") {
+        shares *= t.splitRatio;
+        avgCost /= t.splitRatio;
+        continue;
+      }
       const qty = Math.abs(t.quantity || 0);
       if (!qty) continue;
       if (t.side === "buy") {
@@ -282,7 +298,9 @@ function computeBook(trades) {
         avgCost = shares > 0 ? totalCost / shares : 0;
       } else if (t.side === "sell") {
         if (qty > shares + 0.000001) {
-          throw new Error(symbol + " 的賣出股數超過已知庫存，請補齊期初庫存或公司行動紀錄。");
+          issues.push({ symbol, market, message: "賣出股數超過已知庫存，需核對期初庫存或公司行動" });
+          incomplete = true;
+          break;
         }
         const sold = qty;
         if (sold > 0) {
@@ -310,6 +328,10 @@ function computeBook(trades) {
       }
     }
 
+    if (incomplete) {
+      lots.splice(lotStart);
+      continue;
+    }
     if (shares > 0.000001) {
       positions.push({ symbol, market, currency, broker, shares, avgCost, openedAt });
     }
@@ -317,7 +339,7 @@ function computeBook(trades) {
 
   positions.sort((a, b) => b.shares * b.avgCost - a.shares * a.avgCost);
   lots.sort((a, b) => b.sellDate - a.sellDate);
-  return { positions, lots };
+  return { positions, lots, issues };
 }
 
 function quoteFor(market, symbol) {
@@ -349,7 +371,7 @@ function allPositions() {
     // 零股的 lots 是 0，用 lots × 1000 回推股數會得到 0，只能用金額回推
     // 券商只給到小數兩位的均價，成本 ÷ 均價 會帶進除法誤差（9038.6002 這種）。
     // 台股不會有小數股，四捨五入才不會顯示出根本不存在的精確度。
-    shares: p.avgPrice > 0 ? Math.round(p.totalCost / p.avgPrice) : null,
+    shares: p.avgPrice > 0 && p.totalCost !== null ? Math.round(p.totalCost / p.avgPrice) : null,
     avgCost: p.avgPrice,
     totalCost: p.totalCost,
     lastPrice: p.lastPrice || null,
@@ -551,9 +573,9 @@ function normalizePosition(id, d) {
     currency: d.currency || "TWD",
     avgPrice: Number(d.avgPrice) || 0,
     lastPrice: Number(d.lastPrice) || 0,
-    totalCost: Number(d.totalCost) || 0,
-    marketValue: Number(d.marketValue) || 0,
-    unrealizedPnl: Number(d.unrealizedPnl) || 0,
+    totalCost: d.totalCost == null ? null : Number(d.totalCost),
+    marketValue: d.marketValue == null ? null : Number(d.marketValue),
+    unrealizedPnl: d.unrealizedPnl == null ? null : Number(d.unrealizedPnl),
     exDividends: Number(d.exDividends) || 0,
     earliestEntryDate: parseDate(d.earliestEntryDate),
     cond: d.cond || "Cash",
@@ -781,6 +803,7 @@ function subscribe() {
       id: d.id,
       lastSyncAt: parseDate(d.data().lastSyncAt),
       lastSuccess: d.data().lastSuccess !== false,
+      lastStatus: d.data().lastStatus || (d.data().lastSuccess === false ? "failed" : "success"),
       lastError: d.data().lastError || "",
     }));
     renderSyncBadge();
@@ -977,6 +1000,10 @@ function parseSchwabExport(json, ignoredSymbols = []) {
       continue;
     }
 
+    if (action === "Stock Split" && symbol === "ANET" && date === "2024-12-04") {
+      out.ignored++;
+      continue;
+    }
     if (["Reverse Split", "Stock Split", "Stock Split Adj", "Cash In Lieu"].includes(action)) {
       out.unclassified.push({ action, symbol, date: row.Date, why: "公司行動需要先核對換股比例與成本，暫停匯入以避免錯算" });
       continue;
@@ -2972,6 +2999,15 @@ function render() {
   const view = document.getElementById("view");
   try {
     view.replaceChildren(ROUTES[route]());
+    const issues = computeBook(state.trades).issues.filter(inMarket);
+    const incomplete = state.positions.filter(p => p.totalCost === null).filter(inMarket);
+    if (issues.length || incomplete.length) {
+      view.prepend(el("div", { class: "flash", role: "status", text:
+        "部分合計，尚非完整績效：" +
+        [...issues.map(i => i.symbol + " " + i.message),
+         ...incomplete.map(p => p.symbol + " 券商尚未提供完整成本")].join("；") +
+        "。未確認項目不計入成本／損益，原始交易仍可查閱。" }));
+    }
   } catch (err) {
     view.replaceChildren(blankslate("資料需要核對", err.message));
   }
@@ -2988,8 +3024,11 @@ function renderSyncBadge() {
     .filter((m) => m.lastSyncAt)
     .sort((a, b) => b.lastSyncAt - a.lastSyncAt)[0];
   const failed = state.syncMeta.filter((m) => !m.lastSuccess).map((m) => m.id);
+  const partial = state.syncMeta.filter(m => m.lastStatus === "partial").map(m => m.id);
   const when = latest ? fmtDate(latest.lastSyncAt) : "—";
-  badge.textContent = failed.length ? `${when} · ${failed.join("/")} 失敗` : `同步 ${when}`;
+  badge.textContent = failed.length ? `${when} · ${failed.join("/")} 失敗` :
+    partial.length ? `${when} · ${partial.join("/")} 部分更新` : `同步 ${when}`;
+  badge.title = state.syncMeta.filter(m => m.lastError).map(m => m.id + "：" + m.lastError).join("\n");
 }
 
 /* ---------- theme ---------- */

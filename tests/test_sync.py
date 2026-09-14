@@ -34,6 +34,16 @@ class SyncTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.ns["_build_realized_window"](api, None, date(2026, 1, 1), date(2026, 1, 2))
 
+    def test_pending_zero_cost_does_not_stop_other_positions(self):
+        api = SimpleNamespace(
+            list_positions=lambda account: [SimpleNamespace(code="PENDING", price=0, pnl=0, id=0), SimpleNamespace(code="OK", price=100, pnl=20, id=1)],
+            list_position_detail=lambda account, id: [SimpleNamespace(price=0 if id == 0 else 1000, date="2026-01-01")],
+        )
+        positions, _, _ = self.ns["build_positions"](api, None)
+        self.assertIsNone(positions[0]["totalCost"])
+        self.assertIsNone(positions[0]["unrealizedPnl"])
+        self.assertEqual(positions[1]["totalCost"], 1000)
+
     def test_undated_position_preserves_cost_and_unknown_date(self):
         api = SimpleNamespace(
             list_positions=lambda account: [SimpleNamespace(code="TEST", price=100, pnl=20, id=1)],

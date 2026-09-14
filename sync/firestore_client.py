@@ -125,10 +125,10 @@ def scan_all_users(db, collection_name: str):
             yield doc
 
 
-def set_sync_meta_all(db, broker: str, success: bool, error: str | None):
+def set_sync_meta_all(db, broker: str, success: bool, error: str | None, status=None):
     """共用資料的同步一次服務所有人，狀態就寫進每個人的 syncMeta，兩邊都看得到。"""
     for root in all_user_roots(db):
-        set_sync_meta(root, broker, success, error)
+        set_sync_meta(root, broker, success, error, status=status)
 
 
 def upsert_trade(root, trade: dict):
@@ -252,11 +252,12 @@ def upsert_quote(db, market: str, symbol: str, price: float, source: str):
     return doc_id
 
 
-def set_sync_meta(root, broker: str, success: bool, error: str | None):
+def set_sync_meta(root, broker: str, success: bool, error: str | None, status=None):
     """同步狀態是個人的：她的永豐同步掛了不該顯示在你的畫面上。"""
     data = {
         "lastSyncAt": _now_iso(),
         "lastSuccess": success,
+        "lastStatus": status or ("success" if success else "failed"),
         "lastError": error,
     }
     root.collection("syncMeta").document(broker).set(data, merge=True)
