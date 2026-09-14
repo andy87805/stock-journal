@@ -1312,6 +1312,28 @@ async function importSchwab(parsed, onProgress) {
         (prior.closeDate && prior.closeDate > to)) {
       throw new Error("選擇權匯出期間未涵蓋既有合約，請重新匯出完整歷史。");
     }
+    // 宣告的日期範圍不能證明資料完整：逐筆（含重複次數）保留既有事件。
+    // TSLL1 合併現金腿保有 SourceEvents，核對時展開回原始兩筆。
+    const eventCounts = (events) => {
+      if (!Array.isArray(events) || !events.length) return null;
+      const counts = new Map();
+      for (const event of events) {
+        const originals = Array.isArray(event?.SourceEvents) ? event.SourceEvents : [event];
+        if (!originals.length) return null;
+        for (const row of originals) {
+          if (!row || typeof row !== "object") return null;
+          const key = JSON.stringify(["Date", "Action", "Symbol", "Quantity", "Price", "Amount", "Fees & Comm"]
+            .map(field => String(row[field] ?? "").trim()).concat(
+              String(row.Symbol || "").trim() ? "" : String(row.Description || "").trim()));
+          counts.set(key, (counts.get(key) || 0) + 1);
+        }
+      }
+      return counts;
+    };
+    const oldEvents = eventCounts(prior.events), newEvents = eventCounts(option.events);
+    if (!oldEvents || !newEvents || [...oldEvents].some(([key, count]) => (newEvents.get(key) || 0) < count)) {
+      throw new Error("新檔缺少或更動既有選擇權事件，尚未寫入；請匯出完整紀錄並核對，避免覆蓋已入帳的平倉。");
+    }
   }
 
   for (const t of parsed.trades) {

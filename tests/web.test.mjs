@@ -262,6 +262,47 @@ test("legacy adjusted option document blocks import before writes", async () => 
   assert.equal(commits, 0);
 });
 
+test("option overwrite requires all prior events including duplicate occurrences", async () => {
+  const opening = option("Sell to Open", "$200");
+  const closing = option("Buy to Close", "-$50");
+  for (const [oldRows, newRows, allowed] of [
+    [[opening, closing], [opening], false],
+    [[opening, opening], [opening], false],
+    [[opening], [opening, closing], true],
+    [[opening, closing], [opening, closing], true],
+    [[], [opening], false],
+    [[opening], [{ ...opening, Amount: "$201" }], false],
+  ]) {
+    let commits = 0;
+    const c = vm.createContext({ Date, session: { uid: "test" },
+      parseSchwabDate: v => v,
+      myDoc: (name, id) => name + "/" + id,
+      getDoc: async () => ({ exists: () => true, data: () => ({ openDate: "2026-01-02", events: oldRows }) }),
+      commitInBatches: async () => { commits++; },
+    });
+    vm.runInContext(section("async function importSchwab(", "/* ---------- charts"), c);
+    const run = c.importSchwab({ unclassified: [], trades: [], dividends: [], names: {},
+      range: { from: "2020-01-01", to: "2026-12-31" }, options: [{ id: "same", events: newRows }] });
+    if (allowed) await run; else await assert.rejects(run, /既有選擇權事件/);
+    assert.equal(commits, allowed ? 1 : 0);
+  }
+});
+
+test("merged adjustment source events compare equal to original legs", async () => {
+  const rows = adjustedRows();
+  let commits = 0;
+  const c = vm.createContext({ Date, session: { uid: "test" }, parseSchwabDate: v => v,
+    myDoc: (name, id) => name + "/" + id,
+    getDoc: async () => ({ exists: () => true, data: () => ({ events: rows }) }),
+    commitInBatches: async () => { commits++; },
+  });
+  vm.runInContext(section("async function importSchwab(", "/* ---------- charts"), c);
+  await c.importSchwab({ unclassified: [], trades: [], dividends: [], names: {},
+    range: { from: "2020-01-01", to: "2026-12-31" },
+    options: [{ id: "same", events: [rows[0], { ...rows[1], SourceEvents: [rows[1], rows[2]] }] }] });
+  assert.equal(commits, 1);
+});
+
 test("import conflict preflight writes nothing", async () => {
   let commits = 0;
   const c = vm.createContext({ Date, session: { uid: "test" },
