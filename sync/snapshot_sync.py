@@ -19,6 +19,7 @@ def main():
             continue
         payload = {name: [d.to_dict() for d in root.collection(name).stream()]
                    for name in ("positions", "trades", "options")}
+        payload["cashBalance"] = root.collection("settings").document("cashBalance").get().to_dict()
         if not any(payload.values()):
             continue
         payload["personalQuotes"] = {d.id: d.to_dict() for d in root.collection("quotes").stream()}

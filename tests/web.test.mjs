@@ -8,6 +8,26 @@ import { recordImport } from "../web/import-history.mjs";
 import { valueSnapshot } from "../sync/value_snapshot.mjs";
 import { buildPersonalBackup, PERSONAL_COLLECTIONS } from "../web/account-backup.mjs";
 import { validateCashflow, cashflowTotals } from "../web/cashflows.mjs";
+import { validateCashBalance, cashForSnapshot } from "../web/cash-balance.mjs";
+
+test("cash balance requires explicit zero and same Taiwan date", () => {
+  const now = new Date("2026-09-16T04:00:00Z");
+  const cash = validateCashBalance({ TWD: "100", USD: "-2.50", confirmed: true }, now);
+  assert.equal(cashForSnapshot(cash, now).balances.USD, -2.5);
+  assert.equal(cashForSnapshot(cash, new Date("2026-09-16T16:00:00Z")), null);
+  assert.equal(cashForSnapshot(cash, new Date("2026-09-16T03:00:00Z")), null);
+  assert.throws(() => validateCashBalance({ TWD: "", USD: "0", confirmed: true }));
+  assert.throws(() => validateCashBalance({ TWD: "0", USD: "0", confirmed: false }));
+});
+
+test("complete valuation includes verified cash but excludes unresolved options", () => {
+  const now = new Date();
+  const cashBalance = validateCashBalance({ TWD: "100", USD: "2", confirmed: true }, now);
+  const input = { cashBalance, fx: { rate: 30, updatedAt: now.toISOString() } };
+  assert.equal(valueSnapshot(input, now).totalAssetsTwd, 160);
+  assert.equal(valueSnapshot({ ...input, options: [{ status: "open" }] }, now).totalAssetsTwd, null);
+  assert.equal(valueSnapshot({ cashBalance }, now).complete, false);
+});
 
 test("cashflows validate dates amounts and supported currencies", () => {
   const base = { date: "2026-09-01", currency: "USD", direction: "deposit", amount: "10.25" };

@@ -29,6 +29,7 @@ import { recordImport } from "./import-history.mjs";
 import { journalBatch, undoJournalBatch } from "./import-undo.mjs";
 import { buildPersonalBackup } from "./account-backup.mjs";
 import { validateCashflow, cashflowTotals } from "./cashflows.mjs";
+import { validateCashBalance } from "./cash-balance.mjs";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -3386,7 +3387,7 @@ let snapshotBucket = "day";
 function viewSnapshots() {
   const frag = document.createDocumentFragment();
   frag.appendChild(el("h1", { class: "reconcile-title", text: "每日資產快照" }));
-  frag.appendChild(el("p", { class: "muted", text: "以下是台美股合計的持股市值，不含現金與選擇權，不是完整總資產或投資報酬率。同日保留最後一次同步；週／月／年取該期最後快照，非平均值。沒有快照的日期不補值。" }));
+  frag.appendChild(el("p", { class: "muted", text: "趨勢線仍顯示持股市值；各期卡片另列當日已確認現金。只有所有估值完整才顯示含現金總資產，這不是報酬率。同日保留最後同步，週／月／年取期末最後快照，不補造缺少日期。" }));
   frag.appendChild(segmented([["day", "日"], ["week", "週"], ["month", "月"], ["year", "年"]], snapshotBucket, v => { snapshotBucket = v; render(); }));
   if (state.snapshotsError) frag.appendChild(el("div", { class: "flash", text: state.snapshotsError }));
   const periods = new Map();
@@ -3406,6 +3407,8 @@ function viewSnapshots() {
     el("div", { class: "box-header", text: s.label + " · " + s.date }),
     el("div", { class: "box-body" }, [el("div", { class: "mono", text: "已知持股市值 " + fmtMoney(s.knownHoldingsValueTwd, "TWD") }),
       el("p", { class: "row-sub", text: "擷取時間 " + s.capturedAt }),
+      el("p", { class: "mono", text: "已確認現金 " + (s.cashValueTwd == null ? "—" : fmtMoney(s.cashValueTwd, "TWD")) }),
+      el("p", { class: "mono", text: "含現金總資產 " + (s.complete && Number.isFinite(s.totalAssetsTwd) ? fmtMoney(s.totalAssetsTwd, "TWD") : "—（資料未完整）") }),
       el("p", { class: "row-sub", text: (s.issues || []).join("；") }),
     ]),
   ]));
@@ -3455,6 +3458,7 @@ function viewAccount() {
 function viewCashflows() {
   const frag = document.createDocumentFragment();
   frag.appendChild(el("h1", { class: "reconcile-title", text: "入出金紀錄" }));
+  frag.appendChild(cashBalanceForm());
   frag.appendChild(el("p", { class: "muted", text: "只記錄投資帳戶整體的外部存入／提領；台美券商間轉帳、股票買賣、股利不是外部入出金。淨投入不是現金餘額，也不是損益。尚未自動從券商匯入。" }));
   if (state.cashflowsError) frag.appendChild(el("div", { class: "flash", text: state.cashflowsError }));
   const totals = cashflowTotals(state.cashflows);
@@ -3508,6 +3512,34 @@ function viewCashflows() {
     ])]));
   }
   return frag;
+}
+
+function cashBalanceForm() {
+  const form = el("form", { class: "box-body" });
+  form.appendChild(el("h2", { class: "row-title", text: "確認目前現金餘額" }));
+  form.appendChild(el("p", { class: "row-sub", text: "請依券商帳戶填寫台美所有投資帳戶的淨現金；負債填負數，沒有餘額填 0。這不是入出金，也不含股票市值。只供台灣日期當天的後續快照使用，隔天需重新確認。" }));
+  const fields = {};
+  for (const currency of ["TWD", "USD"]) {
+    fields[currency] = el("input", { id: "balance-" + currency, inputmode: "decimal", required: "" });
+    form.appendChild(el("div", { class: "field" }, [el("label", { for: "balance-" + currency, text: currency + " 淨現金餘額" }), fields[currency]]));
+  }
+  const confirmed = el("input", { type: "checkbox", required: "" });
+  form.appendChild(el("label", {}, [confirmed, " 我已核對所有投資帳戶，包含現金負債"]));
+  const button = el("button", { type: "submit", class: "btn", text: "儲存當日餘額" });
+  const status = el("p", { class: "row-sub", role: "status" });
+  const uid = session.uid;
+  form.onsubmit = async event => {
+    event.preventDefault(); button.disabled = true;
+    try {
+      const value = validateCashBalance({ TWD: fields.TWD.value, USD: fields.USD.value, confirmed: confirmed.checked });
+      if (!uid || session.uid !== uid) throw new Error("帳號已變更。");
+      await setDoc(doc(db, "users", uid, "settings", "cashBalance"), value);
+      status.textContent = "已儲存，當天後續排程會採用；未重算之前的快照。";
+    } catch (err) { status.textContent = err.message; }
+    finally { button.disabled = false; }
+  };
+  form.append(button, status);
+  return el("section", { class: "box" }, [form]);
 }
 
 const ROUTES = {

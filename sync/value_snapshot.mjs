@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import vm from "node:vm";
 import { pathToFileURL } from "node:url";
+import { cashForSnapshot } from "../web/cash-balance.mjs";
 
 // Reuse the PWA accounting engine; fail if its extraction boundaries change.
 const source = fs.readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
@@ -42,12 +43,18 @@ export function valueSnapshot(data, now = new Date()) {
   const values = holdings.map(p => p.marketValue === null ? null : convert(p.marketValue, p.currency));
   if (values.some(v => v === null)) issues.push("估值或匯率不完整");
   // Cash is not inferred from trade proceeds or settlements.
-  issues.push("尚未提供現金餘額，非完整總資產");
-  return { schemaVersion: 1, capturedAt: now.toISOString(), holdings, cash: null,
+  const cash = cashForSnapshot(data.cashBalance, now);
+  if (!cash) issues.push("缺少當日確認的現金餘額，非完整總資產");
+  const cashTwd = cash ? (cash.balances.USD === 0 ? cash.balances.TWD : fx ? cash.balances.TWD + cash.balances.USD * fx.rate : null) : null;
+  if (cash && cashTwd === null) issues.push("現金換算缺少有效匯率");
+  if ((data.positions || []).some(p => p.cond && p.cond !== "Cash")) issues.push("融資融券負債與擔保品尚未完整估值");
+  const known = values.reduce((sum, v) => sum + (v ?? 0), 0);
+  const complete = issues.length === 0 && cashTwd !== null;
+  return { schemaVersion: 2, capturedAt: now.toISOString(), holdings, cash,
     fx: fx ? { rate: fx.rate, updatedAt: fx.updatedAt, base: "USD", quote: "TWD" } : null,
-    knownHoldingsValueTwd: values.reduce((sum, v) => sum + (v ?? 0), 0),
+    knownHoldingsValueTwd: known,
     holdingsComplete: values.every(v => v !== null) && book.issues.length === 0,
-    totalAssetsTwd: null, complete: false, issues: [...new Set(issues)] };
+    cashValueTwd: cashTwd, totalAssetsTwd: complete ? known + cashTwd : null, complete, issues: [...new Set(issues)] };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try { process.stdout.write(JSON.stringify(valueSnapshot(JSON.parse(fs.readFileSync(0, "utf8"))))); }
