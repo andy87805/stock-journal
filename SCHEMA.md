@@ -321,6 +321,9 @@ document ID = broker 名稱（`"sinopac"` / `"schwab"` / `"calendar"`）。
 - PWA 端：Firebase Auth Email/Password，只有一個帳號。PWA 在公開網址上，匿名登入等於門戶大開，所以 `firestore.rules` 把讀寫綁死在那一個 UID（`OWNER_UID`）
 # 2026-09-16 個人操作紀錄補充
 
+- 新版 `importRuns.journalVersion: 1` 保存 `changes/{index}`：`collection`、`sourceId`、`before`（原文檔或 null）、`after`（本次寫入後文檔）、`reverted`。每批 25 份原文檔與變更備份於同一 transaction 寫入，屬個人財務資料，不對外公開。
+- 撤銷狀態新增 `undoing`、`undo_partial`、`undone`，選填 `undoneAt`／`undoError`。核對目前資料與 after 完全一致才還原 before 或刪除本次新增項；每批原子化，不承諾跨批次一次完成。舊版无 journalVersion 紀錄不能撤銷。
+
 - `users/{uid}/trash/{autoId}`：`collection: "trades"`、`sourceId`、`data`（刪除前原文檔）、`deletedAt`（ISO8601）。備份與刪除同一 transaction；還原不覆蓋已存在文檔。無自動清空。
 - `users/{uid}/importRuns/{autoId}`：`filename`、`source`、`sourceRows`、`anomalyRows`、`skippedRows`、`status`（running/completed/interrupted）、`startedAt`、選填 `endedAt`、`confirmed`、選填 `totalWrites`、選填 `audit`（existingRecords/newRecords/optionDocuments/nameDocuments）。僅新版使用者确认的匯入，不含原始檔內容，不提供撤銷依據。
 - `confirmed` 是已收到成功回應的文件寫入筆數，不等同新增成交筆數；running 可能是頁面關閉或最後狀態未寫回。既有筆數僅核對相同 ID 的交易與股利。

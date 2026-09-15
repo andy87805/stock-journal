@@ -5,6 +5,36 @@ import vm from "node:vm";
 import { reconcile } from "../web/reconciliation.mjs";
 import { archiveTrade, restoreTrade } from "../web/trash.mjs";
 import { recordImport } from "../web/import-history.mjs";
+import { journalBatch, undoJournalBatch } from "../web/import-undo.mjs";
+
+test("journal writes preserve before images alongside data, undo restores or removes", async () => {
+  const db = new Map([["run", { status: "running" }], ["old", { note: "keep", price: 1 }]]);
+  const tx = { get: async r => ({ exists: () => db.has(r.id), data: () => db.get(r.id) }),
+    set: (r, d) => db.set(r.id, d), delete: r => db.delete(r.id), update: (r, d) => db.set(r.id, { ...db.get(r.id), ...d }) };
+  const entries = ["old", "new"].map(id => ({ ref: { id }, journalRef: { id: "journal-" + id }, collection: "trades", data: { price: 2 } }));
+  await journalBatch(tx, { id: "run" }, entries, () => {});
+  assert.equal(db.get("old").note, "keep");
+  assert.equal(db.get("journal-new").before, null);
+  db.set("run", { status: "undoing" });
+  await undoJournalBatch(tx, { id: "run" }, entries, () => {});
+  assert.deepEqual(db.get("old"), { note: "keep", price: 1 });
+  assert.equal(db.has("new"), false);
+  await undoJournalBatch(tx, { id: "run" }, entries, () => {});
+  assert.equal(db.get("old").price, 1);
+});
+
+test("undo conflicts and changed sessions stop before any writes", async () => {
+  for (const mode of ["conflict", "session", "missing"]) {
+    let writes = 0;
+    const tx = { get: async r => ({ exists: () => !(mode === "missing" && r.id === "target"),
+      data: () => r.id === "run" ? { status: "undoing" } : r.id === "journal" ?
+        { collection: "trades", sourceId: "target", after: { price: 2 }, before: null } : { price: mode === "conflict" ? 3 : 2 } }),
+      set: () => writes++, update: () => writes++, delete: () => writes++ };
+    await assert.rejects(undoJournalBatch(tx, { id: "run" }, [{ ref: { id: "target" }, journalRef: { id: "journal" }, collection: "trades" }],
+      () => { if (mode === "session") throw Error("account changed"); }));
+    assert.equal(writes, 0);
+  }
+});
 
 test("import history is created before writes and records confirmed progress", async () => {
   const log = [];

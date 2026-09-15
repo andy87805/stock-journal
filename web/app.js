@@ -13,6 +13,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   setDoc,
   updateDoc,
@@ -24,6 +25,7 @@ import { firebaseConfig, OWNER_UID } from "./firebase-config.js";
 import { reconcile } from "./reconciliation.mjs";
 import { archiveTrade, restoreTrade } from "./trash.mjs";
 import { recordImport } from "./import-history.mjs";
+import { journalBatch, undoJournalBatch } from "./import-undo.mjs";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -1349,7 +1351,7 @@ async function withImportLock(task) {
   });
 }
 
-async function importSchwab(parsed, onProgress, onAudit) {
+async function importSchwab(parsed, onProgress, onAudit, writer = commitInBatches) {
   const expectedUid = session.uid;
   const checkSession = () => {
     if (!expectedUid || session.uid !== expectedUid) throw new Error("帳號已變更，已停止匯入");
@@ -1444,8 +1446,61 @@ async function importSchwab(parsed, onProgress, onAudit) {
   if (onAudit) await onAudit({ existingRecords, newRecords: records.length - existingRecords,
     optionDocuments: parsed.options.length, nameDocuments: Object.keys(parsed.names).length });
   checkSession();
-  await commitInBatches(writes, onProgress);
+  await writer(writes, onProgress);
   return writes.length;
+}
+
+async function writeJournaledImport(runRef, uid, writes, onProgress) {
+  const check = () => { if (!uid || session.uid !== uid) throw new Error("帳號已變更，已停止匯入。"); };
+  for (let i = 0; i < writes.length; i += 25) {
+    check();
+    const entries = writes.slice(i, i + 25).map((w, n) => ({ ...w,
+      collection: w.ref.parent.id, journalRef: doc(runRef, "changes", String(i + n).padStart(8, "0")),
+    }));
+    await runTransaction(db, tx => journalBatch(tx, runRef, entries, check));
+    check();
+    if (onProgress) await onProgress(Math.min(i + 25, writes.length), writes.length);
+  }
+  return writes.length;
+}
+
+async function undoImport(id) {
+  return withImportLock(async () => {
+    const uid = session.uid;
+    const check = () => { if (!uid || session.uid !== uid) throw new Error("帳號已變更，已停止撤銷。"); };
+    const ref = doc(db, "users", uid, "importRuns", id);
+    check();
+    await runTransaction(db, async tx => {
+      const snap = await tx.get(ref);
+      check();
+      if (!snap.exists() || snap.data().journalVersion !== 1 ||
+          !["completed", "interrupted", "undo_partial"].includes(snap.data().status)) {
+        throw new Error("這次匯入尚不能撤銷，或其他裝置正在操作。");
+      }
+      tx.update(ref, { status: "undoing", undoError: "" });
+    });
+    try {
+      const snap = await getDocs(collection(ref, "changes"));
+      check();
+      const entries = snap.docs.sort((a, b) => b.id.localeCompare(a.id)).map(d => {
+        const j = d.data();
+        if (!["trades", "dividends", "options", "symbols"].includes(j.collection) ||
+            typeof j.sourceId !== "string" || !j.sourceId || j.sourceId.includes("/")) throw new Error("撤銷紀錄格式異常。");
+        return { collection: j.collection, journalRef: d.ref, ref: doc(db, "users", uid, j.collection, j.sourceId) };
+      });
+      for (let i = 0; i < entries.length; i += 25) {
+        check();
+        await runTransaction(db, tx => undoJournalBatch(tx, ref, entries.slice(i, i + 25), check));
+      }
+      check();
+      await updateDoc(ref, { status: "undone", undoneAt: new Date().toISOString() });
+    } catch (err) {
+      if (session.uid === uid) {
+        try { await updateDoc(ref, { status: "undo_partial", undoError: String(err.message || "撤銷失敗").slice(0, 500) }); } catch { /* remain visibly pending */ }
+      }
+      throw new Error("撤銷未全部完成，已完成部分保留，可核對後重試。" + err.message);
+    }
+  });
 }
 
 /* ---------- charts ---------- */
@@ -2259,14 +2314,14 @@ function renderImportPreview(panel, parsed, filename) {
           const ref = doc(collection(db, "users", uid, "importRuns"));
           const check = () => { if (session.uid !== uid) throw new Error("帳號已變更，已停止匯入。"); };
           return recordImport({
-            metadata: { filename, source: "schwab-json", sourceRows: parsed.total,
+            metadata: { filename, source: "schwab-json", sourceRows: parsed.total, journalVersion: 1,
               anomalyRows: parsed.unclassified.length, skippedRows: parsed.ignored + parsed.skippedBySymbol },
             create: data => { check(); return setDoc(ref, data); },
             update: data => { check(); return updateDoc(ref, data); },
             run: (progress, audit) => importSchwab(parsed, async (done, total) => {
               status.textContent = `寫入中… ${done} / ${total}`;
               await progress(done, total);
-            }, audit),
+            }, audit, (writes, progress) => writeJournaledImport(ref, uid, writes, progress)),
           });
         });
         status.textContent = `完成，共寫入 ${n} 筆。重複匯入同一份不會產生重複資料。`;
@@ -3271,15 +3326,25 @@ function viewReconciliation() {
 function viewTrash() {
   const frag = document.createDocumentFragment();
   frag.appendChild(el("h1", { class: "reconcile-title", text: "匯入紀錄" }));
-  frag.appendChild(el("p", { class: "muted", text: "只記錄新版按下確認的匯入。既有筆數指相同 ID 的交易／股利，非跨來源完整去重。進行中也可能表示頁面關閉或狀態未更新，請先核對。撤銷整次匯入尚未提供。" }));
+  frag.appendChild(el("p", { class: "muted", text: "只記錄新版按下確認的匯入。新版有備份者可撤銷；之後修改過的資料不覆蓋。跨批次可能部分完成，進行中也可能表示頁面已關閉，請先核對。" }));
   if (state.importRunsError) frag.appendChild(el("div", { class: "flash", text: state.importRunsError }));
-  const labels = { running: "進行中／結果待確認", completed: "已完成", interrupted: "已中斷，請核對" };
+  const labels = { running: "進行中／結果待確認", completed: "已完成", interrupted: "已中斷，請核對",
+    undoing: "撤銷中／結果待確認", undo_partial: "撤銷未完成，請核對後重試", undone: "已撤銷" };
   for (const run of state.importRuns) {
+    const feedback = el("p", { class: "row-sub", role: "status" });
+    const undoButton = run.journalVersion === 1 && ["completed", "interrupted", "undo_partial"].includes(run.status)
+      ? el("button", { class: "btn btn-sm btn-danger", text: "撤銷這次匯入", onclick: async event => {
+        if (!confirm("將移除本次新增資料，還原被覆寫的資料。之後已修改者會擋下，可能部分完成。確定撤銷？")) return;
+        event.currentTarget.disabled = true;
+        try { await undoImport(run.id); } catch (err) { feedback.textContent = err.message; }
+      } }) : null;
     frag.appendChild(el("section", { class: "box" }, [el("div", { class: "box-body" }, [
       el("div", { class: "row-title", style: "overflow-wrap:anywhere", text: run.filename || "嘉信 JSON" }),
       el("div", { class: "row-sub", text: String(run.startedAt || "") + " · " + (labels[run.status] || "待確認") }),
       el("p", { class: "row-sub", text: "原檔 " + run.sourceRows + " 列 · 已確認寫入 " + (run.confirmed ?? 0) + " 筆 · 異常 " + (run.anomalyRows ?? 0) + " 列" }),
       el("p", { class: "row-sub", text: run.audit ? "交易／股利：新增 " + run.audit.newRecords + " 筆、既有 " + run.audit.existingRecords + " 筆" : "前置檢查尚未完成" }),
+      undoButton, feedback,
+      run.undoError ? el("p", { class: "row-sub", style: "overflow-wrap:anywhere", text: run.undoError }) : null,
     ])]));
   }
   if (!state.importRuns.length && !state.importRunsError) frag.appendChild(el("p", { class: "muted", text: "尚無新版匯入紀錄。" }));
