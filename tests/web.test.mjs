@@ -3,6 +3,55 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { reconcile } from "../web/reconciliation.mjs";
+import { archiveTrade, restoreTrade } from "../web/trash.mjs";
+import { recordImport } from "../web/import-history.mjs";
+
+test("import history is created before writes and records confirmed progress", async () => {
+  const log = [];
+  const result = await recordImport({ metadata: { filename: "synthetic.json" },
+    create: async d => log.push(d), update: async d => log.push(d),
+    run: async (progress, audit) => { assert.equal(log[0].status, "running");
+      await audit({ existingRecords: 2 }); await progress(3, 3); return 3; } });
+  assert.equal(result, 3);
+  assert.equal(log.at(-1).status, "completed");
+  assert.equal(log.at(-1).confirmed, 3);
+});
+
+test("import history preserves interruption and refuses run when log creation fails", async () => {
+  const log = [];
+  await assert.rejects(recordImport({ metadata: {}, create: async () => {}, update: async d => log.push(d),
+    run: async progress => { await progress(2, 4); throw Error("network"); } }), /network/);
+  assert.equal(log.at(-1).status, "interrupted");
+  assert.equal(log.at(-1).confirmed, 2);
+  await assert.rejects(recordImport({ metadata: {}, create: async () => { throw Error("denied"); },
+    update: async () => {}, run: async () => assert.fail("must not write") }), /denied/);
+});
+
+test("completed data but failed final log is not reported as rolled back", async () => {
+  await assert.rejects(recordImport({ metadata: {}, create: async () => {},
+    update: async () => { throw Error("network"); }, run: async () => 5 }), /資料已寫入/);
+});
+
+test("trash archive preserves all original fields in same transaction as deletion", async () => {
+  const writes = [], original = { symbol: "TEST", quantity: 2, note: "keep me" };
+  const tx = { get: async r => ({ exists: () => r.id === "source", data: () => original }),
+    set: (r, d) => writes.push(["set", r.id, d]), delete: r => writes.push(["delete", r.id]) };
+  assert.equal(await archiveTrade(tx, { id: "source" }, { id: "trash" }, "date", () => {}), true);
+  assert.deepEqual(writes[0][2].data, original);
+  assert.equal(writes[1][0], "delete");
+});
+
+test("trash restore refuses overwrite, invalid target, and account switch", async () => {
+  for (const mode of ["ok", "existing", "invalid", "switch"]) {
+    const writes = [];
+    const payload = { collection: "trades", sourceId: mode === "invalid" ? "../bad" : "source", data: { note: "original" } };
+    const tx = { get: async r => ({ exists: () => r.id === "trash" || mode === "existing", data: () => payload }),
+      set: (r, d) => writes.push([r.id, d]), delete: r => writes.push([r.id]) };
+    const run = restoreTrade(tx, { id: "trash" }, id => ({ id }), () => { if (mode === "switch") throw Error("account"); });
+    if (mode === "ok") { await run; assert.equal(writes[0][1].note, "original"); assert.equal(writes.length, 2); }
+    else { await assert.rejects(run); assert.equal(writes.length, 0); }
+  }
+});
 
 test("reconciliation distinguishes missing baseline and actual cost discrepancy", () => {
   const p = { broker: "sinopac", market: "TW", symbol: "TEST", totalCost: 100, shares: 10, unrealizedPnl: 20 };
@@ -258,7 +307,7 @@ test("delete uses actual ledger shape and never expands symbol scope", async () 
     el: (tag, attrs, children) => ({ tag, ...attrs, children }),
     confirm: () => true,
     myDoc: (name, id) => name + "/" + id,
-    deleteDocsInBatches: async list => refs.push(...list),
+    moveTradesToTrash: async list => refs.push(...list),
   });
   vm.runInContext(section("function deleteFilteredPanel(", "/* ---------- 設定"), c);
   const panel = c.deleteFilteredPanel([
@@ -266,7 +315,7 @@ test("delete uses actual ledger shape and never expands symbol scope", async () 
     { symbol: "TEST", trade: null },
   ]);
   await panel.children[1].onclick();
-  assert.deepEqual(refs, ["trades/one"]);
+  assert.deepEqual(refs, ["one"]);
 });
 
 test("legacy adjusted option document blocks import before writes", async () => {

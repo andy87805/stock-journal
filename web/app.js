@@ -18,9 +18,12 @@ import {
   updateDoc,
   deleteDoc,
   writeBatch,
+  runTransaction,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig, OWNER_UID } from "./firebase-config.js";
 import { reconcile } from "./reconciliation.mjs";
+import { archiveTrade, restoreTrade } from "./trash.mjs";
+import { recordImport } from "./import-history.mjs";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -49,6 +52,10 @@ const sharedCol = (name) => collection(db, name);
 const sharedDoc = (name, id) => doc(db, name, id);
 
 const state = {
+  trash: [],
+  importRuns: [],
+  importRunsError: "",
+  trashError: "",
   positions: [],
   realized: [],
   lots: [],
@@ -720,11 +727,21 @@ function unsubscribeAll() {
   Object.assign(state, {
     positions: [], realized: [], lots: [], trades: [], dividends: [], options: [],
     symbols: {}, personalSymbols: {}, personalQuotes: {}, settings: {}, events: [], quotes: {}, fx: {}, syncMeta: [],
-    allowlist: [], ready: false,
+    allowlist: [], trash: [], trashError: "", importRuns: [], importRunsError: "", ready: false,
   });
 }
 
 function subscribe() {
+  unsubs.push(onSnapshot(myCol("importRuns"), snap => {
+    state.importRuns = snap.docs.map(d => ({ ...d.data(), id: d.id })).sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)));
+    state.importRunsError = "";
+    render();
+  }, () => { state.importRunsError = "匯入紀錄讀取失敗，請確認連線與權限。"; render(); }));
+  unsubs.push(onSnapshot(myCol("trash"), (snap) => {
+    state.trash = snap.docs.map(d => ({ ...d.data(), id: d.id })).sort((a, b) => String(b.deletedAt).localeCompare(String(a.deletedAt)));
+    state.trashError = "";
+    render();
+  }, () => { state.trashError = "垃圾桶讀取失敗，請確認連線與帳號權限。"; render(); }));
   for (const [collectionName, field] of [["symbols", "personalSymbols"], ["quotes", "personalQuotes"]]) {
     unsubs.push(onSnapshot(myCol(collectionName), (snap) => {
       state[field] = Object.fromEntries(snap.docs.map((d) => [d.id, d.data()]));
@@ -869,7 +886,37 @@ async function addManualTrade(data) {
 }
 
 async function deleteTrade(id) {
-  await deleteDoc(myDoc("trades", id));
+  return moveTradesToTrash([id]);
+}
+
+async function moveTradesToTrash(ids) {
+  const uid = session.uid;
+  const check = () => { if (!uid || session.uid !== uid) throw new Error("帳號已變更，已停止移至垃圾桶。"); };
+  check();
+  let done = 0;
+  for (const id of [...new Set(ids)]) {
+    check();
+    const sourceRef = doc(db, "users", uid, "trades", id);
+    const trashRef = doc(collection(db, "users", uid, "trash"));
+    const deletedAt = new Date().toISOString();
+    try {
+      if (await runTransaction(db, tx => archiveTrade(tx, sourceRef, trashRef, deletedAt, check))) done++;
+      check();
+    } catch (err) {
+      throw new Error("已確認移至垃圾桶 " + done + " 筆。本筆結果請重新載入核對；其餘尚未繼續。" + err.message);
+    }
+  }
+  return done;
+}
+
+async function restoreFromTrash(id) {
+  const uid = session.uid;
+  const check = () => { if (!uid || session.uid !== uid) throw new Error("帳號已變更，已停止還原。"); };
+  check();
+  const result = await runTransaction(db, tx => restoreTrade(tx,
+    doc(db, "users", uid, "trash", id), key => doc(db, "users", uid, "trades", key), check));
+  check();
+  return result;
 }
 
 /* ---------- 刪除交易紀錄 ---------- */
@@ -1283,7 +1330,7 @@ async function commitInBatches(writes, onProgress) {
     }
     done += Math.min(BATCH_LIMIT, writes.length - i);
     if (session.uid !== expectedUid) throw new Error("帳號已變更，已停止匯入；已確認寫入 " + done + " 筆，請回原帳號核對。");
-    if (onProgress) onProgress(done, writes.length);
+    if (onProgress) await onProgress(done, writes.length);
   }
   return done;
 }
@@ -1302,7 +1349,7 @@ async function withImportLock(task) {
   });
 }
 
-async function importSchwab(parsed, onProgress) {
+async function importSchwab(parsed, onProgress, onAudit) {
   const expectedUid = session.uid;
   const checkSession = () => {
     if (!expectedUid || session.uid !== expectedUid) throw new Error("帳號已變更，已停止匯入");
@@ -1379,6 +1426,7 @@ async function importSchwab(parsed, onProgress) {
     data.tradeDate || data.payDate || "", data.fee || 0, data.tax || 0,
   ]);
   const records = writes.filter(item => "externalId" in item.data);
+  let existingRecords = 0;
   for (let i = 0; i < records.length; i += 20) {
     checkSession();
     const group = records.slice(i, i + 20);
@@ -1386,11 +1434,15 @@ async function importSchwab(parsed, onProgress) {
     checkSession();
     for (let j = 0; j < group.length; j++) {
       const existing = existingDocs[j];
+      if (existing.exists()) existingRecords++;
       if (existing.exists() && identity(existing.data()) !== identity(group[j].data)) {
         throw new Error("匯入紀錄與既有成交 ID 衝突，尚未寫入；請先核對原始匯出檔。");
       }
     }
   }
+  checkSession();
+  if (onAudit) await onAudit({ existingRecords, newRecords: records.length - existingRecords,
+    optionDocuments: parsed.options.length, nameDocuments: Object.keys(parsed.names).length });
   checkSession();
   await commitInBatches(writes, onProgress);
   return writes.length;
@@ -2202,9 +2254,21 @@ function renderImportPreview(panel, parsed, filename) {
     onclick: async () => {
       confirmBtn.disabled = true;
       try {
-        const n = await withImportLock(() => importSchwab(parsed, (done, total) => {
-          status.textContent = `寫入中… ${done} / ${total}`;
-        }));
+        const n = await withImportLock(async () => {
+          const uid = session.uid;
+          const ref = doc(collection(db, "users", uid, "importRuns"));
+          const check = () => { if (session.uid !== uid) throw new Error("帳號已變更，已停止匯入。"); };
+          return recordImport({
+            metadata: { filename, source: "schwab-json", sourceRows: parsed.total,
+              anomalyRows: parsed.unclassified.length, skippedRows: parsed.ignored + parsed.skippedBySymbol },
+            create: data => { check(); return setDoc(ref, data); },
+            update: data => { check(); return updateDoc(ref, data); },
+            run: (progress, audit) => importSchwab(parsed, async (done, total) => {
+              status.textContent = `寫入中… ${done} / ${total}`;
+              await progress(done, total);
+            }, audit),
+          });
+        });
         status.textContent = `完成，共寫入 ${n} 筆。重複匯入同一份不會產生重複資料。`;
         confirmBtn.remove();
       } catch (err) {
@@ -2255,8 +2319,8 @@ function deleteFilteredPanel(filtered) {
       if (!confirm("只刪除目前篩選出的 " + trades.length + " 筆交易；不刪除股利、選擇權及其他年份。確定繼續？")) return;
       btn.disabled = true;
       try {
-        await deleteDocsInBatches(trades.map(t => myDoc("trades", t.trade.id)));
-        status.textContent = "刪除完成。重新匯入原檔會還原這些交易。";
+        await moveTradesToTrash(trades.map(t => t.trade.id));
+        status.textContent = "已移至垃圾桶，可到垃圾桶頁還原。重新匯入原檔也可能重新建立交易。";
       } catch (err) {
         status.textContent = "刪除失敗：" + err.message;
         btn.disabled = false;
@@ -3204,7 +3268,42 @@ function viewReconciliation() {
   return frag;
 }
 
+function viewTrash() {
+  const frag = document.createDocumentFragment();
+  frag.appendChild(el("h1", { class: "reconcile-title", text: "匯入紀錄" }));
+  frag.appendChild(el("p", { class: "muted", text: "只記錄新版按下確認的匯入。既有筆數指相同 ID 的交易／股利，非跨來源完整去重。進行中也可能表示頁面關閉或狀態未更新，請先核對。撤銷整次匯入尚未提供。" }));
+  if (state.importRunsError) frag.appendChild(el("div", { class: "flash", text: state.importRunsError }));
+  const labels = { running: "進行中／結果待確認", completed: "已完成", interrupted: "已中斷，請核對" };
+  for (const run of state.importRuns) {
+    frag.appendChild(el("section", { class: "box" }, [el("div", { class: "box-body" }, [
+      el("div", { class: "row-title", style: "overflow-wrap:anywhere", text: run.filename || "嘉信 JSON" }),
+      el("div", { class: "row-sub", text: String(run.startedAt || "") + " · " + (labels[run.status] || "待確認") }),
+      el("p", { class: "row-sub", text: "原檔 " + run.sourceRows + " 列 · 已確認寫入 " + (run.confirmed ?? 0) + " 筆 · 異常 " + (run.anomalyRows ?? 0) + " 列" }),
+      el("p", { class: "row-sub", text: run.audit ? "交易／股利：新增 " + run.audit.newRecords + " 筆、既有 " + run.audit.existingRecords + " 筆" : "前置檢查尚未完成" }),
+    ])]));
+  }
+  if (!state.importRuns.length && !state.importRunsError) frag.appendChild(el("p", { class: "muted", text: "尚無新版匯入紀錄。" }));
+  frag.appendChild(el("h1", { class: "reconcile-title", text: "垃圾桶" }));
+  frag.appendChild(el("p", { class: "muted", text: "保存新版移除的手動／匯入交易及備註。還原不會覆蓋已存在的交易；舊版已永久刪除的資料無法追回。目前不自動清空。" }));
+  if (state.trashError) frag.appendChild(el("div", { class: "flash", text: state.trashError }));
+  else if (!state.trash.length) frag.appendChild(blankslate("垃圾桶是空的", "之後刪除的交易會保留在這裡。"));
+  for (const item of state.trash) {
+    const status = el("div", { class: "row-sub", role: "status" });
+    const button = el("button", { class: "btn btn-sm", text: "還原", onclick: async () => {
+      button.disabled = true;
+      try { await restoreFromTrash(item.id); }
+      catch (err) { status.textContent = err.message; button.disabled = false; }
+    } });
+    frag.appendChild(el("div", { class: "box" }, [el("div", { class: "box-body" }, [
+      el("div", { class: "row-title", text: (item.data?.symbol || "未知代號") + " · " + (item.data?.side === "buy" ? "買進" : "賣出") }),
+      el("p", { class: "row-sub", text: "移除時間：" + String(item.deletedAt || "未知") }), button, status,
+    ])]));
+  }
+  return frag;
+}
+
 const ROUTES = {
+  "/trash": viewTrash,
   "/reconciliation": viewReconciliation,
   "/": viewDashboard,
   "/positions": viewPositions,
