@@ -4,6 +4,7 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   sendEmailVerification,
+  sendPasswordResetEmail,
   signOut,
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
@@ -26,6 +27,7 @@ import { reconcile } from "./reconciliation.mjs";
 import { archiveTrade, restoreTrade } from "./trash.mjs";
 import { recordImport } from "./import-history.mjs";
 import { journalBatch, undoJournalBatch } from "./import-undo.mjs";
+import { buildPersonalBackup } from "./account-backup.mjs";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -3403,7 +3405,48 @@ function viewSnapshots() {
   return frag;
 }
 
+function viewAccount() {
+  const frag = document.createDocumentFragment();
+  const status = el("p", { class: "row-sub", role: "status" });
+  const user = auth.currentUser;
+  frag.appendChild(el("h1", { class: "reconcile-title", text: "我的帳號" }));
+  const backupButton = el("button", { class: "btn", text: "下載個人資料備份", onclick: async () => {
+    const uid = session.uid;
+    backupButton.disabled = true;
+    status.textContent = "正在讀取個人資料，請勿切換帳號或同時匯入。";
+    try {
+      const backup = await buildPersonalBackup({ uid, currentUid: () => session.uid,
+        readCollection: async path => {
+          const snap = await getDocs(collection(db, "users", uid, ...path.split("/")));
+          return snap.docs.map(d => ({ id: d.id, data: d.data() }));
+        } });
+      if (session.uid !== uid) throw new Error("帳號已變更，未產生下載。");
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = el("a", { class: "btn", href: url, download: "stock-journal-backup-" + new Date().toISOString().slice(0, 10) + ".json", text: "備份完成，點此儲存 JSON（5 分鐘內）" });
+      status.replaceChildren(link);
+      setTimeout(() => { URL.revokeObjectURL(url); link.removeAttribute("href"); link.textContent = "下載連結已過期，請重新產生備份。"; }, 300000);
+    } catch (err) { status.textContent = "備份失敗：" + err.message; }
+    finally { backupButton.disabled = false; }
+  } });
+  frag.appendChild(el("section", { class: "box" }, [el("div", { class: "box-body" }, [
+    el("p", { text: "Email：" + (session.email || "") }),
+    el("p", { class: "mono", style: "overflow-wrap:anywhere", text: "UID：" + (session.uid || "") }),
+    el("p", { text: user?.emailVerified ? "信箱已驗證" : "信箱尚未驗證" }),
+    !user?.emailVerified ? el("button", { class: "btn", text: "寄送驗證信", onclick: async event => {
+      if (!user || auth.currentUser !== user) return;
+      event.currentTarget.disabled = true;
+      try { await sendEmailVerification(user); status.textContent = "驗證信已寄出，完成後請重新登入。"; }
+      catch { status.textContent = "寄送失敗，請稍後重試。"; }
+    } }) : null,
+    backupButton, status,
+    el("p", { class: "row-sub", text: "備份包含財務明細、垃圾桶與匯入還原紀錄，請妥善保存，不要上傳公開網站。這是逐次讀取備份，非同一瞬間快照；不含密碼、服務金鑰、共用行情或其他帳號。目前不提供整份備份還原。" }),
+  ])]));
+  return frag;
+}
+
 const ROUTES = {
+  "/account": viewAccount,
   "/snapshots": viewSnapshots,
   "/trash": viewTrash,
   "/reconciliation": viewReconciliation,
@@ -3557,6 +3600,19 @@ function initAuth() {
   const errorBox = document.getElementById("authError");
   const submitBtn = document.getElementById("authSubmit");
   const modeBtn = document.getElementById("authModeBtn");
+  const resetBtn = document.getElementById("authResetBtn");
+  resetBtn.onclick = async () => {
+    const input = document.getElementById("authEmail");
+    if (!input.value.trim() || !input.checkValidity()) { input.reportValidity(); return; }
+    resetBtn.disabled = true;
+    errorBox.classList.remove("hidden");
+    try {
+      await sendPasswordResetEmail(auth, input.value.trim());
+      errorBox.textContent = "若這個信箱可重設密碼，將收到重設信，請檢查垃圾郵件。";
+    } catch (err) {
+      errorBox.textContent = err.code === "auth/user-not-found" ? "若這個信箱可重設密碼，將收到重設信，請檢查垃圾郵件。" : "暫時無法寄送，請稍後再試。";
+    } finally { resetBtn.disabled = false; }
+  };
   const modeHint = document.getElementById("authModeHint");
   const pendingBox = document.getElementById("authPending");
   const pendingEmail = document.getElementById("authPendingEmail");
@@ -3640,7 +3696,8 @@ function initAuth() {
     if (settingsTab) settingsTab.classList.toggle("hidden", !session.owner);
 
     if (user && !session.allowed) {
-      pendingEmail.textContent = (user.email || "") + (user.emailVerified ? "" : "（尚未驗證信箱）");
+      pendingEmail.textContent = (user.email || "") + (user.emailVerified ? "" : "（尚未驗證信箱）") + " · UID：" + user.uid;
+      pendingEmail.style.overflowWrap = "anywhere";
       verifyBtn.classList.toggle("hidden", user.emailVerified);
     }
 

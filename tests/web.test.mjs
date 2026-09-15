@@ -6,6 +6,25 @@ import { reconcile } from "../web/reconciliation.mjs";
 import { archiveTrade, restoreTrade } from "../web/trash.mjs";
 import { recordImport } from "../web/import-history.mjs";
 import { valueSnapshot } from "../sync/value_snapshot.mjs";
+import { buildPersonalBackup, PERSONAL_COLLECTIONS } from "../web/account-backup.mjs";
+
+test("personal backup covers private collections and nested import journals only", async () => {
+  const paths = [];
+  const result = await buildPersonalBackup({ uid: "test", currentUid: () => "test",
+    readCollection: async path => { paths.push(path); return path === "importRuns" ? [{ id: "run", data: {} }] : []; } });
+  assert.equal(result.uid, "test");
+  assert.equal(result.consistency, "sequential-read-not-atomic");
+  assert.deepEqual(paths, [...PERSONAL_COLLECTIONS, "importRuns/run/changes"]);
+  assert.ok(!paths.includes("allowlist"));
+});
+
+test("account switch or collection read failure rejects the entire backup", async () => {
+  let uid = "first";
+  await assert.rejects(buildPersonalBackup({ uid, currentUid: () => uid,
+    readCollection: async () => { uid = "second"; return []; } }), /帳號已變更/);
+  await assert.rejects(buildPersonalBackup({ uid: "first", currentUid: () => "first",
+    readCollection: async () => { throw Error("offline"); } }), /offline/);
+});
 
 test("snapshots use shares times price, not dividend-inclusive broker PnL", () => {
   const now = new Date();
