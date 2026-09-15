@@ -1,5 +1,5 @@
 export const PERSONAL_COLLECTIONS = ["trades", "positions", "lots", "realized", "options", "dividends",
-  "settings", "quotes", "symbols", "syncMeta", "assetSnapshots", "trash", "importRuns"];
+  "settings", "quotes", "symbols", "syncMeta", "assetSnapshots", "trash", "importRuns", "cashflows"];
 export async function buildPersonalBackup({ uid, currentUid, readCollection }) {
   const check = () => { if (!uid || currentUid() !== uid) throw new Error("帳號已變更，已停止備份。"); };
   check();

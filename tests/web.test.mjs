@@ -7,6 +7,25 @@ import { archiveTrade, restoreTrade } from "../web/trash.mjs";
 import { recordImport } from "../web/import-history.mjs";
 import { valueSnapshot } from "../sync/value_snapshot.mjs";
 import { buildPersonalBackup, PERSONAL_COLLECTIONS } from "../web/account-backup.mjs";
+import { validateCashflow, cashflowTotals } from "../web/cashflows.mjs";
+
+test("cashflows validate dates amounts and supported currencies", () => {
+  const base = { date: "2026-09-01", currency: "USD", direction: "deposit", amount: "10.25" };
+  assert.equal(validateCashflow(base, "2026-09-16").amount, 10.25);
+  for (const change of [{ date: "2026-02-30" }, { date: "2027-01-01" }, { amount: "-2" }, { amount: "0" },
+    { amount: "1,000" }, { amount: "NaN" }, { amount: "1.234" }, { currency: "EUR" }, { direction: "dividend" }]) {
+    assert.throws(() => validateCashflow({ ...base, ...change }, "2026-09-16"));
+  }
+});
+
+test("net contributions stay separated by currency and exclude void entries", () => {
+  assert.deepEqual(cashflowTotals([
+    { status: "active", currency: "USD", direction: "deposit", amount: 100 },
+    { status: "active", currency: "USD", direction: "withdrawal", amount: 25 },
+    { status: "void", currency: "USD", direction: "deposit", amount: 999 },
+    { status: "active", currency: "TWD", direction: "deposit", amount: 200 },
+  ]), { TWD: 200, USD: 75 });
+});
 
 test("personal backup covers private collections and nested import journals only", async () => {
   const paths = [];

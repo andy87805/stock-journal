@@ -28,6 +28,7 @@ import { archiveTrade, restoreTrade } from "./trash.mjs";
 import { recordImport } from "./import-history.mjs";
 import { journalBatch, undoJournalBatch } from "./import-undo.mjs";
 import { buildPersonalBackup } from "./account-backup.mjs";
+import { validateCashflow, cashflowTotals } from "./cashflows.mjs";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -56,6 +57,8 @@ const sharedCol = (name) => collection(db, name);
 const sharedDoc = (name, id) => doc(db, name, id);
 
 const state = {
+  cashflows: [],
+  cashflowsError: "",
   snapshots: [],
   snapshotsError: "",
   trash: [],
@@ -733,11 +736,15 @@ function unsubscribeAll() {
   Object.assign(state, {
     positions: [], realized: [], lots: [], trades: [], dividends: [], options: [],
     symbols: {}, personalSymbols: {}, personalQuotes: {}, settings: {}, events: [], quotes: {}, fx: {}, syncMeta: [],
-    allowlist: [], trash: [], trashError: "", importRuns: [], importRunsError: "", snapshots: [], snapshotsError: "", ready: false,
+    allowlist: [], trash: [], trashError: "", importRuns: [], importRunsError: "", snapshots: [], snapshotsError: "", cashflows: [], cashflowsError: "", ready: false,
   });
 }
 
 function subscribe() {
+  unsubs.push(onSnapshot(myCol("cashflows"), snap => {
+    state.cashflows = snap.docs.map(d => ({ ...d.data(), id: d.id })).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    state.cashflowsError = ""; render();
+  }, () => { state.cashflowsError = "入出金讀取失敗，請確認連線與權限。"; render(); }));
   unsubs.push(onSnapshot(myCol("assetSnapshots"), snap => {
     state.snapshots = snap.docs.map(d => ({ ...d.data(), id: d.id })).sort((a, b) => String(a.date).localeCompare(String(b.date)));
     state.snapshotsError = ""; render();
@@ -3445,7 +3452,66 @@ function viewAccount() {
   return frag;
 }
 
+function viewCashflows() {
+  const frag = document.createDocumentFragment();
+  frag.appendChild(el("h1", { class: "reconcile-title", text: "入出金紀錄" }));
+  frag.appendChild(el("p", { class: "muted", text: "只記錄投資帳戶整體的外部存入／提領；台美券商間轉帳、股票買賣、股利不是外部入出金。淨投入不是現金餘額，也不是損益。尚未自動從券商匯入。" }));
+  if (state.cashflowsError) frag.appendChild(el("div", { class: "flash", text: state.cashflowsError }));
+  const totals = cashflowTotals(state.cashflows);
+  frag.appendChild(el("p", { class: "mono", text: "已記錄淨投入：" + fmtMoney(totals.TWD, "TWD") + " · " + fmtMoney(totals.USD, "USD") }));
+  const form = el("form", { class: "box-body" });
+  const fields = {};
+  for (const [key, label, type] of [["date", "日期", "date"], ["amount", "金額（正數）", "text"], ["note", "備註（選填）", "text"]]) {
+    const id = "cashflow-" + key;
+    fields[key] = el("input", { id, type, ...(key === "note" ? { maxlength: "300" } : { required: "" }), ...(key === "amount" ? { inputmode: "decimal" } : {}) });
+    form.appendChild(el("div", { class: "field" }, [el("label", { for: id, text: label }), fields[key]]));
+  }
+  for (const [key, label, options] of [["currency", "幣別", [["TWD", "台幣"], ["USD", "美元"]]], ["direction", "類型", [["deposit", "入金"], ["withdrawal", "出金"]]]]) {
+    fields[key] = el("select", { id: "cashflow-" + key }, options.map(([value, text]) => el("option", { value, text })));
+    form.appendChild(el("div", { class: "field" }, [el("label", { for: "cashflow-" + key, text: label }), fields[key]]));
+  }
+  const status = el("p", { class: "row-sub", role: "status" });
+  const submit = el("button", { class: "btn btn-primary", type: "submit", text: "新增紀錄" });
+  const uid = session.uid;
+  form.onsubmit = async event => {
+    event.preventDefault(); submit.disabled = true;
+    try {
+      const now = new Date();
+      const today = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+      const value = validateCashflow(Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v.value])), today);
+      if (!uid || session.uid !== uid) throw new Error("帳號已變更，請重新開啟頁面。");
+      if (!form.cashflowRef) form.cashflowRef = doc(collection(db, "users", uid, "cashflows"));
+      await runTransaction(db, async tx => {
+        const existing = await tx.get(form.cashflowRef);
+        if (session.uid !== uid) throw new Error("帳號已變更。");
+        if (existing.exists()) throw new Error("這次提交已有紀錄，請重新整理核對，勿重複新增。");
+        tx.set(form.cashflowRef, { ...value, createdAt: now.toISOString() });
+      });
+      status.textContent = "已新增。";
+    } catch (err) { status.textContent = err.message; submit.disabled = false; }
+  };
+  form.append(submit, status);
+  frag.appendChild(el("section", { class: "box" }, [form]));
+  for (const row of state.cashflows) {
+    const feedback = el("p", { class: "row-sub", role: "status" });
+    frag.appendChild(el("section", { class: "box" }, [el("div", { class: "box-body" }, [
+      el("div", { class: "row-title", text: row.date + " · " + (row.direction === "deposit" ? "入金" : "出金") + " " + fmtMoney(row.amount, row.currency) + (row.status === "void" ? "（已作廢）" : "") }),
+      el("p", { class: "row-sub", text: row.note || "" }),
+      row.status === "active" ? el("button", { class: "btn btn-sm", text: "作廢", onclick: async event => {
+        if (!confirm("作廢此筆入出金？原紀錄會保留，不再計入淨投入。")) return;
+        event.currentTarget.disabled = true;
+        try {
+          if (session.uid !== uid) throw new Error("帳號已變更。");
+          await updateDoc(doc(db, "users", uid, "cashflows", row.id), { status: "void", voidedAt: new Date().toISOString() });
+        } catch (err) { feedback.textContent = err.message; }
+      } }) : null, feedback,
+    ])]));
+  }
+  return frag;
+}
+
 const ROUTES = {
+  "/cashflows": viewCashflows,
   "/account": viewAccount,
   "/snapshots": viewSnapshots,
   "/trash": viewTrash,
