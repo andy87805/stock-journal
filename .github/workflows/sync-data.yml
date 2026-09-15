@@ -152,13 +152,23 @@ jobs:
         continue-on-error: true
         run: python sync/fx_sync.py
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Save daily asset snapshot
+        id: snapshot
+        continue-on-error: true
+        run: python sync/snapshot_sync.py
+
       - name: Check for failures
         if: always()
         run: |
           if [ "${{ steps.calendar.outcome }}" = "failure" ] || \
              [ "${{ steps.quotes.outcome }}" = "failure" ] || \
              [ "${{ steps.symbols.outcome }}" = "failure" ] || \
-             [ "${{ steps.fx.outcome }}" = "failure" ]; then
+             [ "${{ steps.fx.outcome }}" = "failure" ] || \
+             [ "${{ steps.snapshot.outcome }}" = "failure" ]; then
             echo "至少一支共用資料同步腳本失敗，詳見上方對應步驟的 log"
             exit 1
           fi

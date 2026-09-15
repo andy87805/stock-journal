@@ -5,6 +5,28 @@ import vm from "node:vm";
 import { reconcile } from "../web/reconciliation.mjs";
 import { archiveTrade, restoreTrade } from "../web/trash.mjs";
 import { recordImport } from "../web/import-history.mjs";
+import { valueSnapshot } from "../sync/value_snapshot.mjs";
+
+test("snapshots use shares times price, not dividend-inclusive broker PnL", () => {
+  const now = new Date();
+  const result = valueSnapshot({ positions: [{ symbol: "TEST", market: "TW", broker: "sinopac", currency: "TWD",
+    shares: 10, lastPrice: 20, totalCost: 100, unrealizedPnl: 150, syncedAt: now.toISOString() }] }, now);
+  assert.equal(result.knownHoldingsValueTwd, 200);
+  assert.equal(result.totalAssetsTwd, null);
+  assert.equal(result.cash, null);
+  assert.equal(result.complete, false);
+});
+
+test("snapshot missing quotes and stale FX never fabricate full asset totals", () => {
+  const now = new Date();
+  const base = { positions: [{ symbol: "TEST", currency: "USD", shares: 2, lastPrice: 10,
+    totalCost: 10, syncedAt: now.toISOString() }], fx: { rate: 30, updatedAt: "2000-01-01" } };
+  assert.equal(valueSnapshot(base, now).holdingsComplete, false);
+  base.fx.updatedAt = now.toISOString();
+  assert.equal(valueSnapshot(base, now).knownHoldingsValueTwd, 600);
+  base.positions[0].syncedAt = "2000-01-01";
+  assert.equal(valueSnapshot(base, now).holdings[0].marketValue, null);
+});
 import { journalBatch, undoJournalBatch } from "../web/import-undo.mjs";
 
 test("journal writes preserve before images alongside data, undo restores or removes", async () => {

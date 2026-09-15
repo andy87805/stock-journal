@@ -54,6 +54,8 @@ const sharedCol = (name) => collection(db, name);
 const sharedDoc = (name, id) => doc(db, name, id);
 
 const state = {
+  snapshots: [],
+  snapshotsError: "",
   trash: [],
   importRuns: [],
   importRunsError: "",
@@ -729,11 +731,15 @@ function unsubscribeAll() {
   Object.assign(state, {
     positions: [], realized: [], lots: [], trades: [], dividends: [], options: [],
     symbols: {}, personalSymbols: {}, personalQuotes: {}, settings: {}, events: [], quotes: {}, fx: {}, syncMeta: [],
-    allowlist: [], trash: [], trashError: "", importRuns: [], importRunsError: "", ready: false,
+    allowlist: [], trash: [], trashError: "", importRuns: [], importRunsError: "", snapshots: [], snapshotsError: "", ready: false,
   });
 }
 
 function subscribe() {
+  unsubs.push(onSnapshot(myCol("assetSnapshots"), snap => {
+    state.snapshots = snap.docs.map(d => ({ ...d.data(), id: d.id })).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    state.snapshotsError = ""; render();
+  }, () => { state.snapshotsError = "快照讀取失敗，請確認連線與權限。"; render(); }));
   unsubs.push(onSnapshot(myCol("importRuns"), snap => {
     state.importRuns = snap.docs.map(d => ({ ...d.data(), id: d.id })).sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)));
     state.importRunsError = "";
@@ -3367,7 +3373,38 @@ function viewTrash() {
   return frag;
 }
 
+let snapshotBucket = "day";
+function viewSnapshots() {
+  const frag = document.createDocumentFragment();
+  frag.appendChild(el("h1", { class: "reconcile-title", text: "每日資產快照" }));
+  frag.appendChild(el("p", { class: "muted", text: "以下是台美股合計的持股市值，不含現金與選擇權，不是完整總資產或投資報酬率。同日保留最後一次同步；週／月／年取該期最後快照，非平均值。沒有快照的日期不補值。" }));
+  frag.appendChild(segmented([["day", "日"], ["week", "週"], ["month", "月"], ["year", "年"]], snapshotBucket, v => { snapshotBucket = v; render(); }));
+  if (state.snapshotsError) frag.appendChild(el("div", { class: "flash", text: state.snapshotsError }));
+  const periods = new Map();
+  for (const s of state.snapshots) {
+    const date = new Date(s.date + "T12:00:00");
+    if (!Number.isFinite(+date)) continue;
+    const b = bucketKey(date, snapshotBucket);
+    periods.set(b.key, { ...s, label: b.label });
+  }
+  const records = [...periods.values()];
+  if (!records.length) frag.appendChild(blankslate("尚未累積快照", "部署後的下一次排程會開始記錄，無法還原過去沒有保存的資產狀態。"));
+  else if (records.every(s => s.holdingsComplete && Number.isFinite(s.knownHoldingsValueTwd))) {
+    frag.appendChild(el("div", { class: "box" }, [el("div", { class: "box-header", text: "持股市值 · TWD（非完整總資產）" }),
+      el("div", { class: "chart-wrap" }, [lineChart(records.map(s => ({ label: s.label, value: s.knownHoldingsValueTwd })), "TWD")])]));
+  } else frag.appendChild(el("div", { class: "flash", text: "部分期間估值不完整，暫不連成趨勢線；以下保留已知市值及缺漏原因。" }));
+  for (const s of records.slice().reverse()) frag.appendChild(el("section", { class: "box" }, [
+    el("div", { class: "box-header", text: s.label + " · " + s.date }),
+    el("div", { class: "box-body" }, [el("div", { class: "mono", text: "已知持股市值 " + fmtMoney(s.knownHoldingsValueTwd, "TWD") }),
+      el("p", { class: "row-sub", text: "擷取時間 " + s.capturedAt }),
+      el("p", { class: "row-sub", text: (s.issues || []).join("；") }),
+    ]),
+  ]));
+  return frag;
+}
+
 const ROUTES = {
+  "/snapshots": viewSnapshots,
   "/trash": viewTrash,
   "/reconciliation": viewReconciliation,
   "/": viewDashboard,

@@ -321,6 +321,8 @@ document ID = broker 名稱（`"sinopac"` / `"schwab"` / `"calendar"`）。
 - PWA 端：Firebase Auth Email/Password，只有一個帳號。PWA 在公開網址上，匿名登入等於門戶大開，所以 `firestore.rules` 把讀寫綁死在那一個 UID（`OWNER_UID`）
 # 2026-09-16 個人操作紀錄補充
 
+- `users/{uid}/assetSnapshots/{YYYY-MM-DD}`：`date`（台灣日期）、`capturedAt`、`schemaVersion:1`、`holdings`（symbol/market/currency/broker/shares/cost/marketValue/pnl/priceAt）、`fx`、`knownHoldingsValueTwd`、`holdingsComplete`、`issues`。目前 `cash:null`、`totalAssetsTwd:null`、`complete:false`，不可當完整資產或報酬率。同日取最後同步，不回填歷史。
+
 - 新版 `importRuns.journalVersion: 1` 保存 `changes/{index}`：`collection`、`sourceId`、`before`（原文檔或 null）、`after`（本次寫入後文檔）、`reverted`。每批 25 份原文檔與變更備份於同一 transaction 寫入，屬個人財務資料，不對外公開。
 - 撤銷狀態新增 `undoing`、`undo_partial`、`undone`，選填 `undoneAt`／`undoError`。核對目前資料與 after 完全一致才還原 before 或刪除本次新增項；每批原子化，不承諾跨批次一次完成。舊版无 journalVersion 紀錄不能撤銷。
 
